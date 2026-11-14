@@ -43,8 +43,10 @@ jobs:
         if: ${{ !cancelled() && steps.build_app.outcome == 'success' }}
         timeout-minutes: 2
         run: |
-          open -W -n build/longBlog.app --args --smoke-test --screenshot "$PWD/build/smoke-dashboard.png"
-          test -s build/smoke-dashboard.png
+          for section in dashboard inbox posts memos configuration; do
+            open -W -n build/longBlog.app --args --smoke-test --screenshot "$PWD/build/smoke-$section.png" --smoke-section "$section"
+            test -s "build/smoke-$section.png"
+          done
       - name: Upload smoke screenshot
         if: always()
         uses: actions/upload-artifact@v4

@@ -47,7 +47,14 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        DispatchQueue.main.async { self.showWorkspaceIfNeeded() }
+        DispatchQueue.main.async {
+            self.showWorkspaceIfNeeded()
+            let args = ProcessInfo.processInfo.arguments
+            if args.contains("--smoke-test"), let i = args.firstIndex(of: "--smoke-section"), args.indices.contains(i + 1) {
+                let sections: [String: WorkspaceSection] = ["dashboard": .dashboard, "inbox": .inbox, "posts": .posts, "memos": .memos, "configuration": .configuration]
+                if let section = sections[args[i + 1]] { AppModel.shared.navigate(section) }
+            }
+        }
         NSApp.activate(ignoringOtherApps: true)
         if ProcessInfo.processInfo.arguments.contains("--smoke-test") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
