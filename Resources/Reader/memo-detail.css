@@ -1,0 +1,12 @@
+/* Native glass owns the frame and padding; this document never scrolls vertically. */
+html,body{background:transparent!important;min-width:0;width:100%;max-width:100%;overflow-x:hidden;overflow-y:hidden}
+#reader{width:100%;max-width:none;min-width:0;padding:0!important;margin:0;display:flow-root}
+#title,#meta,#status:empty{display:none}
+#content{min-width:0;max-width:100%;overflow-wrap:anywhere;display:flow-root}
+#content>:first-child{margin-top:0}#content>:last-child{margin-bottom:0}
+#content h1{font-size:25px;margin:1em 0 .5em}#content pre,#content .table-scroll,#content .math-block{max-width:100%}
+#content .code-block{min-width:0;max-width:100%}#content .code-toolbar{overflow-wrap:anywhere}
+#content .mermaid-image{max-height:640px;width:100%;object-fit:contain}
+/* Never let a long word or generated diagram expand the outer native card. */
+#content>*,#content details{max-width:100%;min-width:0}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}

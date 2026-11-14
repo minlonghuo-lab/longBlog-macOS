@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>菜单栏常驻面板</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="position:relative;width:1280px;height:800px;overflow:hidden;background:linear-gradient(135deg,#8a5a44 0%,#3a2a3a 45%,#1d3f40 100%);font-family:-apple-system,'SF Pro Text','PingFang SC',system-ui,sans-serif;color:#f3e9e1">
+
+<div style="position:absolute;left:0;top:0;width:1280px;height:30px;display:flex;align-items:center;gap:20px;padding:0 18px;box-sizing:border-box;background:rgba(20,14,12,0.45);font-size:13px;color:#f3e9e1">
+<span style="font-weight:700">longBlog</span><span>文件</span><span>编辑</span><span>文章</span><span>窗口</span>
+<div style="margin-left:auto;display:flex;align-items:center;gap:16px">
+<span style="display:flex;align-items:center;gap:5px;padding:2px 9px;border-radius:6px;background:rgba(255,255,255,0.22)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg><span style="font-size:12px;font-weight:600;color:#ffd9c2">2</span></span>
+<span>Wi-Fi</span><span>62%</span><span>周五 14:42</span>
+</div>
+</div>
+
+<div style="position:absolute;left:80px;top:130px;width:520px;height:340px;border-radius:12px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1)"></div>
+<div style="position:absolute;left:150px;top:200px;font-size:13px;color:rgba(255,255,255,0.35)">完整窗口仅在写文章、批量提交时打开</div>
+
+<div style="position:absolute;right:120px;top:40px;width:380px;box-sizing:border-box;border-radius:16px;padding:16px;background:rgba(44,34,29,0.9);box-shadow:0 24px 60px rgba(0,0,0,0.5),0 0 0 1px rgba(255,255,255,0.14);display:flex;flex-direction:column;gap:12px">
+
+<div style="display:flex;align-items:center;gap:8px"><span style="font-size:15px;font-weight:600">longBlog</span><span style="font-size:12px;color:#7fd69a">● 站点运行中</span><span style="margin-left:auto;font-size:11px;color:#a89a8f">刚刚同步</span></div>
+
+<div style="border-radius:12px;padding:12px;background:rgba(232,180,154,0.15);border:1px solid rgba(232,180,154,0.3);display:flex;flex-direction:column;gap:8px">
+<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#d9ccc2"><span style="color:#ffd9c2;font-weight:600">终端留言 · 2 个未读</span><span style="margin-left:auto;color:#a89a8f">1 分钟前</span></div>
+<div style="font-size:13px;line-height:1.5">访客：你好，想问问博客的 LaTeX 公式是怎么渲染的？</div>
+<div style="display:flex;gap:8px"><div style="flex:1;height:30px;box-sizing:border-box;border-radius:8px;background:rgba(0,0,0,0.25);display:flex;align-items:center;padding:0 10px;font-size:12px;color:#a89a8f">快速回复…</div><div style="height:30px;box-sizing:border-box;border-radius:8px;background:#e8b49a;color:#33241c;font-size:12px;font-weight:600;display:flex;align-items:center;padding:0 12px">发送 ↩</div></div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+<div style="border-radius:12px;padding:10px 12px;background:rgba(255,255,255,0.06)"><div style="font-size:11px;color:#a89a8f">线上构建</div><div style="font-size:13px;color:#7fd69a;margin-top:3px">10:19 · 最新</div></div>
+<div style="border-radius:12px;padding:10px 12px;background:rgba(255,255,255,0.06)"><div style="font-size:11px;color:#a89a8f">HTTPS 证书</div><div style="font-size:13px;color:#7fd69a;margin-top:3px">剩 16 天</div></div>
+</div>
+
+<div style="border-radius:12px;padding:10px 12px;background:rgba(255,255,255,0.06);display:flex;align-items:center;gap:8px;font-size:13px"><span>待提交文章</span><span style="color:#ffd9c2;font-weight:600">2 篇</span><span style="margin-left:auto;font-size:12px;color:#a89a8f">⌘⇧P 提交</span></div>
+
+<div style="display:flex;gap:8px">
+<div style="flex:1;height:34px;border-radius:9px;background:#e8b49a;color:#33241c;font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:center">打开 longBlog</div>
+<div style="width:34px;height:34px;border-radius:9px;background:rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center" aria-label="新建文章"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></div>
+</div>
+</div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":800}}'>
+class Component extends DCLogic {
+renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

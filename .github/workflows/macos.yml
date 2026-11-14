@@ -1,0 +1,85 @@
+name: Build macOS DMG
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Universal app and DMG
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify toolchain
+        run: |
+          xcodebuild -version
+          xcrun swiftc --version
+          command -v rg || brew install ripgrep
+      - name: Source and security regression tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build both architectures, test native core and package DMG
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          bash scripts/build.sh
+      - name: Native macOS window smoke test
+        timeout-minutes: 2
+        run: build/longBlog.app/Contents/MacOS/longBlog --smoke-test --screenshot "$PWD/build/smoke-dashboard.png"
+      - name: Upload smoke screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: longBlog-macOS-smoke
+          path: build/smoke-dashboard.png
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Upload DMG and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: longBlog-macOS-universal
+          path: |
+            build/longBlog-*-universal.dmg
+            build/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload application bundle for UI validation
+        run: ditto -c -k --sequesterRsrc --keepParent build/longBlog.app build/longBlog.app.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: longBlog-macOS-app
+          path: build/longBlog.app.zip
+          retention-days: 14
+
+  release:
+    name: Publish tagged preview
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: longBlog-macOS-universal
+          path: dist
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.dmg dist/SHA256SUMS.txt \
+            --title "longBlog macOS $GITHUB_REF_NAME" --prerelease \
+            --notes-file docs/RELEASE-NOTES.md

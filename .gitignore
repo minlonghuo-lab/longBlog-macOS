@@ -1,0 +1,13 @@
+build/
+.DS_Store
+*.dSYM/
+.env
+*.p12
+*.mobileprovision
+*.cer
+*.key
+*.pem
+__pycache__/
+*.pyc
+.swiftpm/
+DerivedData/

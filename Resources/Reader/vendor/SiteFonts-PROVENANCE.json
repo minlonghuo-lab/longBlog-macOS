@@ -1,0 +1,20 @@
+[
+  {
+    "package": "lxgw-wenkai-screen-webfont",
+    "version": "1.7.0",
+    "tarballSHA1": "75109e5aa0d848659a73ef4d4eb9921ccbf9af3d",
+    "fontBytes": 5102384
+  },
+  {
+    "package": "@fontsource-variable/eb-garamond",
+    "version": "5.3.0",
+    "tarballSHA1": "f6b01dcc69384d22069ffb0b60dcee830f989384",
+    "fontBytes": 501560
+  },
+  {
+    "package": "@fontsource-variable/jetbrains-mono",
+    "version": "5.2.5",
+    "tarballSHA1": "9e79f9fe01ac4712a3806e7e590bdb0f0dcb38ca",
+    "fontBytes": 86244
+  }
+]
