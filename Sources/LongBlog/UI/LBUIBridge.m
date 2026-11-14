@@ -95,6 +95,7 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
             NSMutableDictionary *certs = [NSMutableDictionary dictionary];
             [s.certs enumerateKeysAndObjectsUsingBlock:^(NSString *k, id value, BOOL *stop){ certs[k] = [value isKindOfClass:NSError.class] ? [value localizedDescription] : value; }];
             Finish(done, @{@"postsCount":s.posts ? @(s.posts.count) : NSNull.null, @"publicMemosCount":s.memos ? @(s.memos.count) : NSNull.null,
+                @"friendsCount":s.envText ? @([LBEnvFile parse:s.envText].friendIndexes.count) : NSNull.null,
                 @"head":s.head ?: @{}, @"build":s.build ?: @{}, @"memosVersion":s.memosVersion ?: @{}, @"certs":certs, @"errors":errors,
                 @"deployState":[s deployState:nil pending:nil]}, nil);
         }]; return;

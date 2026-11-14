@@ -37,7 +37,9 @@ jobs:
           bash scripts/build.sh
       - name: Native macOS window smoke test
         timeout-minutes: 2
-        run: build/longBlog.app/Contents/MacOS/longBlog --smoke-test --screenshot "$PWD/build/smoke-dashboard.png"
+        run: |
+          open -W -n build/longBlog.app --args --smoke-test --screenshot "$PWD/build/smoke-dashboard.png"
+          test -s build/smoke-dashboard.png
       - name: Upload smoke screenshot
         if: always()
         uses: actions/upload-artifact@v4
