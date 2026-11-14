@@ -46,7 +46,7 @@ struct ConnectionSettingsView: View {
                 }
                 Section("文章工作区") {
                     HStack { Text(values["folder"] ?? "Posts"); Spacer(); Button("选择文件夹…") { chooseFolder() }.disabled(locked) }
-                    Text("默认使用应用 Documents/Posts。外部文件夹使用安全作用域书签。选择目录不会自动迁移、删除或提交文章。").font(.caption).foregroundStyle(.secondary)
+                    Text("默认使用 Application Support/longBlog/Posts。外部文件夹使用安全作用域书签。选择目录不会自动迁移、删除或提交文章。").font(.caption).foregroundStyle(.secondary)
                 }
                 Section("AI 写作") {
                     Text("在文章编辑器点“AI 写作”，独立设置 HTTPS 接口、模型和 Keychain 密钥。生成结果只有在编辑快照未变化时才能应用。").font(.callout).foregroundStyle(.secondary)

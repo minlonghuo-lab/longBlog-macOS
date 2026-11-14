@@ -7,6 +7,8 @@ Native WebKit integration still needs the macOS smoke checklist in READER-PORT.m
 from pathlib import Path
 from html.parser import HTMLParser
 import json
+import os
+import tempfile
 import re
 import shutil
 import subprocess
@@ -63,6 +65,43 @@ class ReaderContracts(unittest.TestCase):
         self.assertNotIn('"video/', source)
         self.assertNotIn('"audio/', source)
         self.assertNotIn("Data(contentsOf:", source)
+
+    def test_trusted_system_alias_keeps_article_and_asset_nofollow(self):
+        source = (SWIFT / "ReaderResources.swift").read_text()
+        self.assertIn("Darwin.open(parent.path", source)
+        self.assertNotIn("openPinnedDirectory", source)
+        # Exercise the same POSIX boundary: a trusted alias is an ANCESTOR,
+        # while the pinned article leaf and every resource component reject links.
+        with tempfile.TemporaryDirectory(prefix="reader-contract-") as scratch:
+            base = Path(scratch)
+            article = base / "physical/parent/article"
+            assets = article / "assets"
+            assets.mkdir(parents=True)
+            (base / "alias").symlink_to(base / "physical", target_is_directory=True)
+            good = b"\x89PNG\r\n\x1a\nfixture"
+            (assets / "pixel.png").write_bytes(good)
+            (base / "outside.png").write_bytes(good)
+            (assets / "escape.png").symlink_to(base / "outside.png")
+            (article.parent / "linked-article").symlink_to(article, target_is_directory=True)
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            descriptors = []
+            try:
+                parent = os.open(base / "alias/parent", flags)
+                descriptors.append(parent)
+                root = os.open("article", flags, dir_fd=parent)
+                descriptors.append(root)
+                directory = os.open("assets", flags, dir_fd=root)
+                descriptors.append(directory)
+                file = os.open("pixel.png", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                descriptors.append(file)
+                self.assertEqual(os.read(file, 100), good)
+                with self.assertRaises(OSError):
+                    os.open("escape.png", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+                with self.assertRaises(OSError):
+                    os.open("linked-article", flags, dir_fd=parent)
+            finally:
+                for descriptor in reversed(descriptors):
+                    os.close(descriptor)
 
     def test_csp_and_all_script_assets_are_local(self):
         parser = PageParser()

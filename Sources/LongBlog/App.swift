@@ -43,8 +43,18 @@ struct LongBlogApp: App {
 }
 
 final class LongBlogAppDelegate: NSObject, NSApplicationDelegate {
+    private var workspaceWindow: NSWindow?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        DispatchQueue.main.async {
+            self.showWorkspaceIfNeeded()
+            let args = ProcessInfo.processInfo.arguments
+            if args.contains("--smoke-test"), let i = args.firstIndex(of: "--smoke-section"), args.indices.contains(i + 1) {
+                let sections: [String: WorkspaceSection] = ["dashboard": .dashboard, "inbox": .inbox, "posts": .posts, "memos": .memos, "configuration": .configuration]
+                if let section = sections[args[i + 1]] { AppModel.shared.navigate(section) }
+            }
+        }
         NSApp.activate(ignoringOtherApps: true)
         if ProcessInfo.processInfo.arguments.contains("--smoke-test") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
@@ -53,18 +63,63 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @MainActor
+    private func showWorkspaceIfNeeded() {
+        if let existing = NSApp.windows.first(where: {
+            ($0.contentView?.bounds.width ?? 0) >= 1000 && ($0.contentView?.bounds.height ?? 0) >= 600
+        }) {
+            existing.makeKeyAndOrderFront(nil)
+            return
+        }
+        // A handcrafted bundle can receive launch completion before SwiftUI opens
+        // its first scene. Retain an explicit native host instead of starting windowless.
+        if workspaceWindow == nil {
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
+                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                  backing: .buffered, defer: false)
+            window.title = "longBlog"
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isReleasedWhenClosed = false
+            window.minSize = NSSize(width: 1050, height: 722)
+            window.contentView = NSHostingView(rootView: RootView())
+            window.center()
+            workspaceWindow = window
+        }
+        workspaceWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { showWorkspaceIfNeeded() }
+        return true
+    }
+
     private func captureSmokeWindow() {
-        guard let view = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView,
-              view.bounds.width >= 1000, view.bounds.height >= 600,
+        let args = ProcessInfo.processInfo.arguments
+        let screenshot: URL? = args.firstIndex(of: "--screenshot").flatMap { i in
+            args.indices.contains(i + 1) ? URL(fileURLWithPath: args[i + 1]) : nil
+        }
+        // Hosted runners may have a smaller virtual display than a user's Mac.
+        // Record actual window geometry; do not confuse display constraints with no window.
+        let diagnostics: [String: Any] = [
+            "windows": NSApp.windows.map { ["class": NSStringFromClass(type(of: $0)), "visible": $0.isVisible,
+                "frame": NSStringFromRect($0.frame), "contentBounds": NSStringFromRect($0.contentView?.bounds ?? .zero)] as [String: Any] },
+            "screens": NSScreen.screens.map { NSStringFromRect($0.frame) }
+        ]
+        if let destination = screenshot?.appendingPathExtension("json"),
+           let data = try? JSONSerialization.data(withJSONObject: diagnostics, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: destination)
+        }
+        guard let view = NSApp.windows.first(where: {
+            $0.isVisible && ($0.contentView?.bounds.width ?? 0) >= 400 && ($0.contentView?.bounds.height ?? 0) >= 300
+        })?.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             fputs("Smoke test failed: no laid-out application window.\n", stderr)
             exit(1)
         }
         view.cacheDisplay(in: view.bounds, to: rep)
-        let args = ProcessInfo.processInfo.arguments
-        if let i = args.firstIndex(of: "--screenshot"), args.indices.contains(i + 1),
-           let png = rep.representation(using: .png, properties: [:]) {
-            do { try png.write(to: URL(fileURLWithPath: args[i + 1])) }
+        if let destination = screenshot, let png = rep.representation(using: .png, properties: [:]) {
+            do { try png.write(to: destination) }
             catch { fputs("Smoke screenshot write failed.\n", stderr); exit(1) }
         }
         print("Smoke test: native macOS window created and rendered.")

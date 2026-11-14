@@ -29,21 +29,30 @@ jobs:
       - name: Source and security regression tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Build both architectures, test native core and package DMG
+        id: build_app
         shell: bash
         run: |
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
             export VERSION="${GITHUB_REF_NAME#v}"
           fi
           bash scripts/build.sh
-      - name: Native macOS window smoke test
+      - name: Native WebKit offline reader and resource boundaries
         timeout-minutes: 2
-        run: build/longBlog.app/Contents/MacOS/longBlog --smoke-test --screenshot "$PWD/build/smoke-dashboard.png"
+        run: bash scripts/test_reader.sh
+      - name: Native macOS window smoke test
+        if: ${{ !cancelled() && steps.build_app.outcome == 'success' }}
+        timeout-minutes: 2
+        run: |
+          for section in dashboard inbox posts memos configuration; do
+            open -W -n build/longBlog.app --args --smoke-test --screenshot "$PWD/build/smoke-$section.png" --smoke-section "$section"
+            test -s "build/smoke-$section.png"
+          done
       - name: Upload smoke screenshot
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: longBlog-macOS-smoke
-          path: build/smoke-dashboard.png
+          path: build/smoke-*
           if-no-files-found: ignore
           retention-days: 14
       - name: Upload DMG and checksum

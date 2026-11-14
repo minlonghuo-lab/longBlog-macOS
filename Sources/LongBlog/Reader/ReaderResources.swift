@@ -10,6 +10,10 @@ final class ReaderResources: NSObject, WKURLSchemeHandler {
     private let bundleRoot: URL? = Bundle.main.resourceURL
     private var rootDescriptor: Int32 = -1
     private var articleRoot: URL?
+    // Internal numeric diagnostics only; never exposed to article JavaScript.
+    // 1=invalid URL, 2=invalid leaf, 3=parent open, 4=leaf open, 5=ready.
+    private(set) var rootOpenStage = 0
+    private(set) var rootOpenErrno: Int32 = 0
     private var articleHost = "article-" + UUID().uuidString.lowercased()
     var hasArticleRoot: Bool { rootDescriptor >= 0 }
     var articleBaseURL: URL { URL(string: "\(Self.scheme)://\(articleHost)/")! }
@@ -30,32 +34,30 @@ final class ReaderResources: NSObject, WKURLSchemeHandler {
         if rootDescriptor >= 0 { Darwin.close(rootDescriptor) }
         rootDescriptor = -1
         articleRoot = root
+        rootOpenStage = 1
+        rootOpenErrno = 0
         articleHost = "article-" + UUID().uuidString.lowercased()
-        guard let root = root, root.isFileURL,
-              let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-              values.isDirectory == true, values.isSymbolicLink != true else { return }
-        // Resolve only trusted system ancestors, never resolve the article leaf itself:
-        // swapping the leaf for a symlink between resourceValues and open must fail closed.
+        guard let root = root, root.isFileURL else { return }
+        // Resolve only trusted system ancestors, never resolve the article leaf itself.
+        // Its directory type and non-symlink status are checked atomically by openat,
+        // not by cached URL resource metadata followed by a separate path lookup.
+        rootOpenStage = 2
         let leaf = root.standardizedFileURL
         guard leaf.lastPathComponent != "/", !leaf.lastPathComponent.isEmpty else { return }
         let parent = leaf.deletingLastPathComponent().resolvingSymlinksInPath()
-        let directory = Self.openPinnedDirectory(parent)
-        guard directory >= 0 else { return }
+        // The supplied parent is trusted (and may traverse macOS system aliases such
+        // as /var -> /private/var). Do not walk its URL.pathComponents with O_NOFOLLOW:
+        // Foundation's canonical spelling need not eliminate all system aliases.
+        // Pin that parent first; the untrusted article leaf and EVERY descendant still
+        // use openat(O_NOFOLLOW), so neither root nor attachment symlinks can escape.
+        rootOpenStage = 3
+        let directory = Darwin.open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { rootOpenErrno = errno; return }
         defer { Darwin.close(directory) }
+        rootOpenStage = 4
         rootDescriptor = Darwin.openat(directory, leaf.lastPathComponent,
                                        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-    }
-
-    private static func openPinnedDirectory(_ directory: URL) -> Int32 {
-        var descriptor = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else { return -1 }
-        for component in directory.pathComponents.dropFirst() {
-            let next = Darwin.openat(descriptor, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            Darwin.close(descriptor)
-            guard next >= 0 else { return -1 }
-            descriptor = next
-        }
-        return descriptor
+        if rootDescriptor >= 0 { rootOpenStage = 5 } else { rootOpenErrno = errno }
     }
 
     private static func pathParts(_ url: URL) -> [String]? {

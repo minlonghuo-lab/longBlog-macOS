@@ -162,6 +162,11 @@ struct PostDraft: Equatable {
     var isDirty: Bool { draft != saved }
     var filtered: [DataRow] { articles.filter { (filter == "全部" || ($0.flag("publish") ? filter == "已发布" : filter == "草稿")) && (search.isEmpty || $0.text("title").localizedCaseInsensitiveContains(search) || $0.text("summary").localizedCaseInsensitiveContains(search)) } }
     func resetBuffer() { draft = PostDraft(); saved = draft; editing = false; frozenReview = [] }
+    func reloadCurrent() {
+        guard !draft.id.isEmpty, !isDirty else { return }
+        let id = draft.id
+        run("load", "posts.load", ["id":id]) { self.draft = PostDraft($0); self.saved = self.draft }
+    }
     func refresh() { run("list", "posts.list") { self.articles = rows($0["rows"]); self.staged = $0["staged"] as? [[String: Any]] ?? []; self.folder = $0["folder"] as? String ?? "Posts"; self.loaded = true } }
     func discardThen(_ action: @escaping () -> Void) {
         guard !busy else { return }
@@ -184,13 +189,13 @@ struct PostDraft: Equatable {
     func stage(_ publish: Bool) {
         guard !draft.id.isEmpty, !busy else { return }
         let id = draft.id
-        let apply = { self.run("stage", "posts.stage", ["id":id, "publish":publish], success: publish ? "已暂存发布；请审阅后批量提交。" : "已暂存下架；线上尚未改变。") { _ in self.refresh() } }
+        let apply = { self.run("stage", "posts.stage", ["id":id, "publish":publish], success: publish ? "已暂存发布；请审阅后批量提交。" : "已暂存下架；线上尚未改变。") { _ in self.refresh(); self.reloadCurrent() } }
         if isDirty { save(after: apply) } else { apply() }
     }
     func sync() {
         guard !busy else { return }
         AppModel.shared.confirm("同步 GitHub 文章？", "下载 main 的文章和附件。Core 会保留本地草稿、修改和待确认事务；不会自动提交。", button: "同步") {
-            self.run("sync", "posts.sync", success: "GitHub 同步完成；本地修改已保留。") { _ in self.refresh() }
+            self.run("sync", "posts.sync", success: "GitHub 同步完成；本地修改已保留。") { _ in self.refresh(); self.reloadCurrent() }
         }
     }
     func review() {
@@ -202,7 +207,7 @@ struct PostDraft: Equatable {
         let frozen = frozenReview, message = commitMessage
         guard !frozen.isEmpty, !busy else { return }
         AppModel.shared.confirm("将 \(frozen.count) 项变更提交到 main？", "创建一个原子提交，并以非强制方式更新分支。失败或结果未知时不自动重试；Core 的 pending 保护保持生效。", button: "提交到 main") {
-            self.run("commit", "posts.commit", ["rows":frozen, "message":message], success: "文章批次已提交。部署仍需等待流水线。") { _ in AppModel.shared.showingReview = false; self.refresh() }
+            self.run("commit", "posts.commit", ["rows":frozen, "message":message], success: "文章批次已提交。部署仍需等待流水线。") { _ in AppModel.shared.showingReview = false; self.refresh(); self.reloadCurrent() }
         }
     }
     func revert() {

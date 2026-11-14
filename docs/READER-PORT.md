@@ -89,7 +89,7 @@ node --check Resources/MacReader/reader.js
 - 混合恶意 script / 事件 / SVG foreignObject / iframe / javascript 链接 / 远程视频和图片：作者脚本执行计数 0、正文事件属性 0、禁止节点 0、远程图片 0。
 - HTML 模式：LaTeX 正常排版，HTML 尾文保留；作者 data 图片、自定义 scheme 图片、作者 id、link ping / target 和带账号密码链接全部移除；安全 HTTPS 链接保留 no-referrer。
 
-这些浏览器验证覆盖实际 DOM 与第三方离线库，不等同于原生 macOS scheme-handler 测试。当前环境没有 macOS SDK / Swift 编译器，尚未执行 macOS 编译与签名运行。
+这些浏览器验证覆盖实际 DOM 与第三方离线库，不等同于原生 macOS scheme-handler 测试。主代理已确认生产 Reader 在真实 macOS 15 / Xcode 16.4 上完成 arm64、x86_64 编译。当前子代理环境没有 macOS SDK，新增原生集成测试尚需在该 macOS runner 运行；编译成功不等于 WebKit 集成测试通过。
 
 ## macOS 必做验收与限制
 
@@ -100,3 +100,62 @@ node --check Resources/MacReader/reader.js
 - 本实现故意不做远程图片代理、音视频播放、PDF 预览、附件下载、跨文章文件访问、HTML 任意样式或交互、Mermaid 内公式与自定义主题、代码语法着色。此限制是默认离线最小权限边界，不是网络回退缺陷。
 - 文件读取有上限但同步执行；非常大的合法图片可能短暂占用主线程。字节上限不等于解码像素上限；极端图片仍可能导致 WebKit 内容进程资源压力，进程退出时 Reader 会重新加载当前正文。
 - 文章根被传入后是一项受信任能力；调用方不能把整个文库误传入。任意本地进程若已有修改受信任父目录 / app bundle 的能力，不属于网页作者隔离威胁模型。
+
+## 独立原生 WebKit 集成测试（ReaderSmoke）
+
+新增 `tests/ReaderSmoke.swift`，它**不属于应用发布目标**。仅依赖 Reader 的两个 Swift 源文件以及 AppKit / SwiftUI / WebKit（Foundation、Darwin 由系统 SDK 提供）。需要 macOS 14+ 且有 WindowServer 的登录会话；无在线服务、第三方测试包、生产数据、Keychain 或屏幕录制权限依赖。
+
+测试手工创建 NSApplication、NSWindow 和 `NSHostingView(rootView: ReaderView(...))`；通过公开 NSView 子视图遍历找到实际 WKWebView，以 `callAsyncJavaScript` 每 200ms 检查正式 `lbmac-resource` 页面，不改 CSP、不替换资源协议、不用 localhost。
+
+真实断言覆盖：GFM 表格、KaTeX 节点和已加载的 KaTeX FontFace、已解码的 Mermaid data-image、完整图表源码与尾文、`/assets/smoke-note/pixel.png` 映射到临时 article/assets 并成功解码为 2×2、本篇 assets 内指向根外真实 PNG 的 symlink 被拒绝。还检查作者脚本未执行、事件属性与 iframe/SVG/音视频节点被剥离、无远程图片和 HTTP(S) Resource Timing 条目。
+
+内容通过后，将测试代理包装在**实际生产 WKNavigationDelegate**外，发起一次脚本 HTTPS 导航（`.other`，不是用户链接），等待原委托明确返回 `.cancel`，并确认原 custom-scheme 文档仍在。代理即使发现生产意外放行也会强制取消以避免测试发送网络请求，但此时测试判失败，不把强制取消冒充生产安全策略通过。不发送真实 `.linkActivated`，因此不打开默认浏览器。此测试不是操作系统级网络抓包；覆盖实际生产导航策略及页面公开资源记录。
+
+以下命令在项目根运行，假设 `build/longBlog.app` 已构建。测试 app 必须有自己的 `Contents/Resources`，否则 Bundle.main 会找不到阅读壳：
+
+```sh
+APP="$PWD/build/ReaderSmoke.app"
+mkdir -p "$APP/Contents/MacOS"
+ditto build/longBlog.app/Contents/Resources "$APP/Contents/Resources"
+cat >"$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>ReaderSmoke</string>
+<key>CFBundleIdentifier</key><string>org.longblog.ReaderSmoke</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleName</key><string>ReaderSmoke</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+</dict></plist>
+PLIST
+xcrun --sdk macosx swiftc -parse-as-library -swift-version 5 \
+  -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+  -target "$(uname -m)-apple-macos14.0" \
+  Sources/LongBlog/Reader/ReaderView.swift \
+  Sources/LongBlog/Reader/ReaderResources.swift tests/ReaderSmoke.swift \
+  -framework SwiftUI -framework AppKit -framework WebKit \
+  -o "$APP/Contents/MacOS/ReaderSmoke"
+# Optional ad-hoc signing: no signing identity / Keychain certificate required.
+codesign --force --sign - "$APP"
+"$APP/Contents/MacOS/ReaderSmoke" --screenshot "$PWD/build/reader-smoke.png"
+```
+
+也可不传 `--screenshot`；截图使用公开 `WKWebView.takeSnapshot`，只截取测试自己的 WebView。截图请求失败会退出 1。正常输出是一行 `READER_SMOKE {…}` JSON，仅包含布尔断言与固定原因代码，不打印临时目录、URL、正文或系统错误详情。所有断言通过退出 0，失败退出 1，用法错误退出 2；主线程 28 秒断言期限加独立 30 秒硬 watchdog，包含 WebKit/截图卡住时的有界退出。正常完成自动删除本次临时 fixture；硬 watchdog 时可能留下自己的临时目录，不读取或清理其他文件。
+
+当前子代理环境仅验证了内嵌检查 JavaScript 的 Node 语法；**未运行这个原生 harness**。请将 macOS runner 的实际 JSON、退出码、可选 PNG 作为集成测试结果，不把此说明当成已通过的 native 运行记录。
+
+主构建集成可直接调用父代理准备的 `scripts/test_reader.sh`：harness 不硬编码 executable 或 bundle identifier，使用复制的 shipping Info.plist、`Contents/MacOS/longBlog` 和 `--screenshot build/smoke-reader.png` 同样兼容；只需确保 executable 与 Info.plist 一致。此独立 main 不导入生产 App.swift、Core 或 AI，不能加入 shipping 源文件列表。
+
+## 原生图片失败后的边界修正与数字诊断
+
+真实 CI `43634359500` 中数学、图表、表格、尾文、字体均成功，但 `localPNG` / `symlinkDenied` 同时失败；这与本地图片在建立文章能力之前被拒绝的现象一致，旧日志不足以证明具体失败 syscall。
+
+修正 ReaderResources：不再从 `/` 对可信系统祖先逐个 `openat(O_NOFOLLOW)`，以免 macOS / Foundation 保留的系统别名导致合法文章根不可用。现在先用 `open(parent.path, O_DIRECTORY|O_NOFOLLOW)` 固定可信父目录，随后文章叶目录及每个附件组件仍全部 `openat(O_NOFOLLOW)`。文章根类型与非 symlink 状态直接由内核原子打开检查，不依赖可能缓存的 URL resourceValues 元数据。没有放宽正文路径、MIME、CSP、附件符号链接、根叶符号链接或跨篇访问约束。
+
+ReaderSmoke 原有 `localPNG` 必须真实解码为 2×2、`symlinkDenied` 必须出现真实资源拒绝回调的断言保持不变。另在同一 JSON 添加纯整数 `diagnostics`：`nativeRootAvailable`、`nativeRootOpenStage`、`nativeRootOpenErrno`，以及 `localElement` / `localComplete` / `localNaturalWidth` / `localScheme` / `localUnmapped` / `localUnavailable` / `symlinkElement` / `symlinkNaturalWidth` / `symlinkUnmapped` / `symlinkUnavailable`。不打印文件名、临时根、URL、正文或错误详情；也不增加任何向网页暴露的 native bridge。
+
+根 stage：1=无效/缺少 file URL；2=无效叶名称；3=可信父目录打开失败；4=文章叶目录打开失败；5=描述符已建立。errno 仅为失败 syscall 的数字。成功预期 stage=5、errno=0、localNaturalWidth=2、symlinkUnavailable=1；localUnmapped=1 表示前端未取得合法资源能力，localUnavailable=1 表示已有资源 URL 但传输或解码失败。
+
+新增 POSIX 回归用例验证可信祖先别名可用，同时文章根 symlink 与附件 symlink 继续拒绝；共 7 项契约全部通过。修正后的原生图片结果仍必须由下一轮 macOS CI 确认，不能将本地契约通过当成已完成 native 修复验证。

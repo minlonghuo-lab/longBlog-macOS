@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @ObservedObject var model: DashboardModel
-    private let columns = [GridItem(.flexible()), GridItem(.flexible())]
+    private let columns = Array(repeating: GridItem(.flexible(minimum: 140), spacing: 16, alignment: .top), count: 4)
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
@@ -14,14 +14,12 @@ struct DashboardView: View {
                     MetricCard(title: "文章", value: count("postsCount"), symbol: "doc.text", note: "本地工作区 / GitHub 同步状态")
                     MetricCard(title: "公开说说", value: count("publicMemosCount"), symbol: "quote.bubble", note: "站点公开镜像，不等同于 Memos 私有总数")
                     InboxMetric(model: AppModel.shared.inbox)
-                    Panel("连接与权限") {
-                        Label("站点、GitHub、留言、Memos 独立配置", systemImage: "key.horizontal")
-                        Text("连接成功只由实际请求结果证明；不会使用设计稿中的示例数值。").font(.caption).foregroundStyle(.secondary)
-                        Button("管理连接…") { AppModel.shared.showingSettings = true }
-                    }
+                    MetricCard(title: "友链", value: count("friendsCount"), symbol: "link", note: "从 GitHub 站点配置读取")
                 }
-                deployment
-                certificates
+                HStack(alignment: .top, spacing: 18) {
+                    deployment.frame(maxWidth: .infinity)
+                    certificates.frame(maxWidth: .infinity)
+                }
                 if let errors = model.data["errors"] as? [String: String], !errors.isEmpty {
                     Panel("服务读取结果") { ForEach(errors.keys.sorted(), id: \.self) { key in Label("\(key)：\(errors[key] ?? "")", systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange).textSelection(.enabled) } }
                 }
