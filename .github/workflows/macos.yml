@@ -29,6 +29,7 @@ jobs:
       - name: Source and security regression tests
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Build both architectures, test native core and package DMG
+        id: build_app
         shell: bash
         run: |
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
@@ -39,6 +40,7 @@ jobs:
         timeout-minutes: 2
         run: bash scripts/test_reader.sh
       - name: Native macOS window smoke test
+        if: ${{ !cancelled() && steps.build_app.outcome == 'success' }}
         timeout-minutes: 2
         run: |
           open -W -n build/longBlog.app --args --smoke-test --screenshot "$PWD/build/smoke-dashboard.png"
