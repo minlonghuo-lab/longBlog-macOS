@@ -1,6 +1,6 @@
 # Native macOS UI port
 
-Status: implementation complete and ready for the parent's first actual macOS compile. This environment has no Swift/macOS SDK, so compile/runtime validation is delegated to the parent CI; no live backend writes were executed.
+Status: implementation complete. The integrated app has now compiled on real macOS CI for arm64 and x86_64; native business and AI fixtures passed. Final workflow/startup evidence and remaining manual checks are recorded in `VERIFICATION.md`. No live private-backend writes were executed.
 
 - `Sources/LongBlog/UI/` is owned by the UI port; do not overwrite.
 - **Required bridging header addition:** `#import "UI/LBUIBridge.h"` (or relative include appropriate to your bridging header). The UI adapter uses stable C entry points to avoid ambiguous Objective-C Swift importer spellings; its `.m` must be in the source build.
@@ -65,7 +65,7 @@ Reader calls use `ReaderView(markdown:baseDirectory:)`; explicit HTML articles u
 - Article permanent delete and memo permanent delete are intentionally omitted; memo archive/restore and article staged unpublish are the reversible alternatives. Attachments removed from a memo are unlinked only on Save, never silently deleted from the server.
 - Existing friend fields are editable in their dotenv group. Adding/removing entire numbered friend groups is deferred to repository editing.
 - Manual refresh rather than a new polling/background-notification/menu-bar system; no drag/drop or multiwindow-independent editors. Shared AppModel intentionally represents one retained editing workspace.
-- Memos draft buffers survive sidebar changes but are not newly wired to Core's encrypted on-disk draft API. Quit/selection/connection changes protect dirty buffers with confirmation or a save/discard prerequisite.
+- Memos draft buffers survive sidebar changes but are not yet wired to Core's permission-protected on-disk draft API (POSIX permissions, not encryption). Quit/selection/connection changes protect dirty buffers with confirmation or a save/discard prerequisite.
 - Memos preview renders body Markdown; separate attachment rows use authenticated cache downloads/native opening. Inline authenticated attachment images are not rewritten into preview HTML. Article inline PNG/JPEG/GIF/WebP images follow reader capability mapping; unsupported local formats remain attachment links.
 - AI body/summary/continuation is wired. Selection-only polishing is not implemented. Returned AI text cannot overwrite an editor changed since the sheet opened.
 - Dark theme is intentional for this initial chosen-design port. No fabricated demo rows, deployments, certificate expiry numbers or mock online status.

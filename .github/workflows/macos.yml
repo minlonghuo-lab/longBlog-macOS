@@ -35,6 +35,9 @@ jobs:
             export VERSION="${GITHUB_REF_NAME#v}"
           fi
           bash scripts/build.sh
+      - name: Native WebKit offline reader and resource boundaries
+        timeout-minutes: 2
+        run: bash scripts/test_reader.sh
       - name: Native macOS window smoke test
         timeout-minutes: 2
         run: |
