@@ -38,7 +38,7 @@ for ARCH in arm64 x86_64; do
     -o "$BUILD/obj/$ARCH/longBlog"
 done
 xcrun lipo -create "$BUILD/obj/arm64/longBlog" "$BUILD/obj/x86_64/longBlog" -output "$APP/Contents/MacOS/longBlog"
-xcrun lipo -verify_arch arm64 x86_64 "$APP/Contents/MacOS/longBlog"
+xcrun lipo "$APP/Contents/MacOS/longBlog" -verify_arch arm64 x86_64
 cp -R Resources/. "$APP/Contents/Resources/"
 python3 scripts/make_plist.py "$APP/Contents/Info.plist" "$VERSION" "$BUILD_NUMBER"
 if [[ -f Resources/AppIcon1024.png ]]; then
