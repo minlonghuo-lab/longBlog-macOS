@@ -54,17 +54,31 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func captureSmokeWindow() {
-        guard let view = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView,
-              view.bounds.width >= 1000, view.bounds.height >= 600,
+        let args = ProcessInfo.processInfo.arguments
+        let screenshot: URL? = args.firstIndex(of: "--screenshot").flatMap { i in
+            args.indices.contains(i + 1) ? URL(fileURLWithPath: args[i + 1]) : nil
+        }
+        // Hosted runners may have a smaller virtual display than a user's Mac.
+        // Record actual window geometry; do not confuse display constraints with no window.
+        let diagnostics: [String: Any] = [
+            "windows": NSApp.windows.map { ["class": NSStringFromClass(type(of: $0)), "visible": $0.isVisible,
+                "frame": NSStringFromRect($0.frame), "contentBounds": NSStringFromRect($0.contentView?.bounds ?? .zero)] as [String: Any] },
+            "screens": NSScreen.screens.map { NSStringFromRect($0.frame) }
+        ]
+        if let destination = screenshot?.appendingPathExtension("json"),
+           let data = try? JSONSerialization.data(withJSONObject: diagnostics, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: destination)
+        }
+        guard let view = NSApp.windows.first(where: {
+            $0.isVisible && ($0.contentView?.bounds.width ?? 0) >= 400 && ($0.contentView?.bounds.height ?? 0) >= 300
+        })?.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             fputs("Smoke test failed: no laid-out application window.\n", stderr)
             exit(1)
         }
         view.cacheDisplay(in: view.bounds, to: rep)
-        let args = ProcessInfo.processInfo.arguments
-        if let i = args.firstIndex(of: "--screenshot"), args.indices.contains(i + 1),
-           let png = rep.representation(using: .png, properties: [:]) {
-            do { try png.write(to: URL(fileURLWithPath: args[i + 1])) }
+        if let destination = screenshot, let png = rep.representation(using: .png, properties: [:]) {
+            do { try png.write(to: destination) }
             catch { fputs("Smoke screenshot write failed.\n", stderr); exit(1) }
         }
         print("Smoke test: native macOS window created and rendered.")

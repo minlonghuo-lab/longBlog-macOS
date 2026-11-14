@@ -45,7 +45,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: longBlog-macOS-smoke
-          path: build/smoke-dashboard.png
+          path: build/smoke-*
           if-no-files-found: ignore
           retention-days: 14
       - name: Upload DMG and checksum
