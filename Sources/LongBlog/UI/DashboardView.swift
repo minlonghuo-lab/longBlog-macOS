@@ -2,7 +2,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @ObservedObject var model: DashboardModel
-    private let columns = [GridItem(.adaptive(minimum: 180), spacing: 16)]
+    private let columns = Array(repeating: GridItem(.flexible(minimum: 140), spacing: 16, alignment: .top), count: 4)
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {

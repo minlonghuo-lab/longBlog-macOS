@@ -101,6 +101,7 @@ private final class ReaderSmokeRunner {
     private var navigationDispatched = false
     private var finishing = false
     private var assertions: [String: Bool] = [:]
+    private var diagnostics: [String: Int] = [:]
 
     init(screenshot: URL?) { self.screenshot = screenshot }
 
@@ -168,6 +169,14 @@ private final class ReaderSmokeRunner {
             self.polling = false
             guard case .success(let value) = result, let checks = value as? [String: Any] else { return }
             for key in Self.checkKeys { self.assertions[key] = (checks[key] as? NSNumber)?.boolValue ?? false }
+            if let numbers = checks["diagnostics"] as? [String: Any] {
+                for (key, value) in numbers { self.diagnostics[key] = (value as? NSNumber)?.intValue ?? -1 }
+            }
+            if let coordinator = (self.probe?.original ?? web.navigationDelegate) as? ReaderView.Coordinator {
+                self.diagnostics["nativeRootAvailable"] = coordinator.resources.hasArticleRoot ? 1 : 0
+                self.diagnostics["nativeRootOpenStage"] = coordinator.resources.rootOpenStage
+                self.diagnostics["nativeRootOpenErrno"] = Int(coordinator.resources.rootOpenErrno)
+            }
             let url = web.url
             self.assertions["nativeAppDocument"] = url?.scheme == "lbmac-resource" &&
                 url?.host == "app" && url?.path == "/MacReader/index.html"
@@ -229,6 +238,7 @@ private final class ReaderSmokeRunner {
         if let scratch = scratch { try? FileManager.default.removeItem(at: scratch) }
         // Output only booleans and controlled tokens, never URLs, paths, HTML, errors or notes.
         let report: [String: Any] = ["passed": passed, "failure": reason, "assertions": assertions,
+                                     "diagnostics": diagnostics,
                                      "screenshotRequested": screenshot != nil, "screenshotWritten": screenshotWritten]
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
            let json = String(data: data, encoding: .utf8) { print("READER_SMOKE " + json) }
@@ -254,7 +264,22 @@ private final class ReaderSmokeRunner {
     const diagram = c.querySelector('img.mermaid-image');
     const status = document.getElementById('reader-status');
     const fonts = document.fonts ? Array.from(document.fonts) : [];
+    const blocked = Array.from(c.querySelectorAll('.blocked-resource'));
+    const unmapped = label => blocked.some(node => node.textContent.startsWith('图片未加载') && node.textContent.includes(label));
+    const unavailable = label => blocked.some(node => node.textContent === '本地图片不可用：' + label);
     return {
+      diagnostics: {
+        localElement: local ? 1 : 0,
+        localComplete: local && local.complete ? 1 : 0,
+        localNaturalWidth: local ? local.naturalWidth : -1,
+        localScheme: local && local.src.startsWith('lbmac-resource://article-') ? 1 : 0,
+        localUnmapped: unmapped('local-png') ? 1 : 0,
+        localUnavailable: unavailable('local-png') ? 1 : 0,
+        symlinkElement: escape ? 1 : 0,
+        symlinkNaturalWidth: escape ? escape.naturalWidth : -1,
+        symlinkUnmapped: unmapped('symlink-escape') ? 1 : 0,
+        symlinkUnavailable: unavailable('symlink-escape') ? 1 : 0
+      },
       rendererPresent: !!(window.LBMacReader && typeof window.LBMacReader.render === 'function'),
       table: c.querySelectorAll('table').length === 1 && c.querySelectorAll('tbody tr').length === 2,
       math: c.querySelectorAll('.katex').length === 1,

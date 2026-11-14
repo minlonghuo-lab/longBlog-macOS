@@ -147,3 +147,15 @@ codesign --force --sign - "$APP"
 当前子代理环境仅验证了内嵌检查 JavaScript 的 Node 语法；**未运行这个原生 harness**。请将 macOS runner 的实际 JSON、退出码、可选 PNG 作为集成测试结果，不把此说明当成已通过的 native 运行记录。
 
 主构建集成可直接调用父代理准备的 `scripts/test_reader.sh`：harness 不硬编码 executable 或 bundle identifier，使用复制的 shipping Info.plist、`Contents/MacOS/longBlog` 和 `--screenshot build/smoke-reader.png` 同样兼容；只需确保 executable 与 Info.plist 一致。此独立 main 不导入生产 App.swift、Core 或 AI，不能加入 shipping 源文件列表。
+
+## 原生图片失败后的边界修正与数字诊断
+
+真实 CI `43634359500` 中数学、图表、表格、尾文、字体均成功，但 `localPNG` / `symlinkDenied` 同时失败；这与本地图片在建立文章能力之前被拒绝的现象一致，旧日志不足以证明具体失败 syscall。
+
+修正 ReaderResources：不再从 `/` 对可信系统祖先逐个 `openat(O_NOFOLLOW)`，以免 macOS / Foundation 保留的系统别名导致合法文章根不可用。现在先用 `open(parent.path, O_DIRECTORY|O_NOFOLLOW)` 固定可信父目录，随后文章叶目录及每个附件组件仍全部 `openat(O_NOFOLLOW)`。文章根类型与非 symlink 状态直接由内核原子打开检查，不依赖可能缓存的 URL resourceValues 元数据。没有放宽正文路径、MIME、CSP、附件符号链接、根叶符号链接或跨篇访问约束。
+
+ReaderSmoke 原有 `localPNG` 必须真实解码为 2×2、`symlinkDenied` 必须出现真实资源拒绝回调的断言保持不变。另在同一 JSON 添加纯整数 `diagnostics`：`nativeRootAvailable`、`nativeRootOpenStage`、`nativeRootOpenErrno`，以及 `localElement` / `localComplete` / `localNaturalWidth` / `localScheme` / `localUnmapped` / `localUnavailable` / `symlinkElement` / `symlinkNaturalWidth` / `symlinkUnmapped` / `symlinkUnavailable`。不打印文件名、临时根、URL、正文或错误详情；也不增加任何向网页暴露的 native bridge。
+
+根 stage：1=无效/缺少 file URL；2=无效叶名称；3=可信父目录打开失败；4=文章叶目录打开失败；5=描述符已建立。errno 仅为失败 syscall 的数字。成功预期 stage=5、errno=0、localNaturalWidth=2、symlinkUnavailable=1；localUnmapped=1 表示前端未取得合法资源能力，localUnavailable=1 表示已有资源 URL 但传输或解码失败。
+
+新增 POSIX 回归用例验证可信祖先别名可用，同时文章根 symlink 与附件 symlink 继续拒绝；共 7 项契约全部通过。修正后的原生图片结果仍必须由下一轮 macOS CI 确认，不能将本地契约通过当成已完成 native 修复验证。
