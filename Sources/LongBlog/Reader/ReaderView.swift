@@ -9,11 +9,20 @@ struct ReaderView: NSViewRepresentable {
     let markdown: String
     let baseDirectory: URL?
     let bodyFormat: BodyFormat
+    /// Split-view live preview: hides the reader chrome, shows `title`, debounces typing.
+    var live = false
+    var title = ""
+    /// 0...1 editor scroll position mirrored into the preview (nil = leave scrolling to the user).
+    var scrollFraction: Double?
 
-    init(markdown: String, baseDirectory: URL? = nil, bodyFormat: BodyFormat = .markdown) {
+    init(markdown: String, baseDirectory: URL? = nil, bodyFormat: BodyFormat = .markdown,
+         live: Bool = false, title: String = "", scrollFraction: Double? = nil) {
         self.markdown = markdown
         self.baseDirectory = baseDirectory
         self.bodyFormat = bodyFormat
+        self.live = live
+        self.title = title
+        self.scrollFraction = scrollFraction
     }
 
     init(html: String, baseDirectory: URL? = nil) {
@@ -34,12 +43,15 @@ struct ReaderView: NSViewRepresentable {
         view.uiDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = false
         view.underPageBackgroundColor = .clear
-        context.coordinator.update(markdown: markdown, format: bodyFormat, root: baseDirectory, in: view)
+        context.coordinator.live = live
+        context.coordinator.update(markdown: markdown, format: bodyFormat, root: baseDirectory, title: title, in: view)
         return view
     }
 
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        context.coordinator.update(markdown: markdown, format: bodyFormat, root: baseDirectory, in: nsView)
+        context.coordinator.live = live
+        context.coordinator.update(markdown: markdown, format: bodyFormat, root: baseDirectory, title: title, in: nsView)
+        if let fraction = scrollFraction { context.coordinator.scroll(to: fraction, in: nsView) }
     }
 
     static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
@@ -57,10 +69,22 @@ struct ReaderView: NSViewRepresentable {
         private var ready = false
         private var loading = false
         private var revision = 0
+        private var currentTitle = ""
+        private var pendingRender: DispatchWorkItem?
+        private var lastFraction: Double?
+        var live = false
 
-        func update(markdown: String, format: BodyFormat, root: URL?, in view: WKWebView) {
-            guard currentBody != markdown || currentFormat != format || currentRoot != root else { return }
+        func scroll(to fraction: Double, in view: WKWebView) {
+            guard ready, lastFraction != fraction else { return }
+            lastFraction = fraction
+            view.callAsyncJavaScript("window.LBMacReader.scrollTo(fraction)", arguments: ["fraction": fraction], in: nil, in: .page) { _ in }
+        }
+
+        func update(markdown: String, format: BodyFormat, root: URL?, title: String = "", in view: WKWebView) {
+            guard currentBody != markdown || currentFormat != format || currentRoot != root || currentTitle != title else { return }
             let rootChanged = currentRoot != root
+            let firstBody = currentBody == nil
+            currentTitle = title
             currentBody = markdown
             currentFormat = format
             currentRoot = root
@@ -71,14 +95,22 @@ struct ReaderView: NSViewRepresentable {
                 ready = false
                 loading = true
                 view.load(URLRequest(url: ReaderResources.documentURL, cachePolicy: .reloadIgnoringLocalCacheData))
-            } else if ready { render(in: view) }
+            } else if ready {
+                pendingRender?.cancel()
+                // Live typing: coalesce keystrokes so KaTeX / Mermaid are not rebuilt per character.
+                guard live, !firstBody else { render(in: view); return }
+                let work = DispatchWorkItem { [weak self, weak view] in if let self = self, let view = view { self.render(in: view) } }
+                pendingRender = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+            }
         }
 
         private func render(in view: WKWebView) {
             guard ready, let body = currentBody else { return }
             let payload: [String: Any] = ["body": body, "bodyFormat": currentFormat.rawValue,
                                            "hasRoot": resources.hasArticleRoot, "revision": revision,
-                                           "resourceBase": resources.articleBaseURL.absoluteString]
+                                           "resourceBase": resources.articleBaseURL.absoluteString,
+                                           "compact": live, "title": currentTitle]
             // Structured arguments preserve quotes, Unicode and </script>; no source interpolation.
             view.callAsyncJavaScript("return await window.LBMacReader.render(payload)",
                                      arguments: ["payload": payload], in: nil, in: .page) { _ in }
@@ -89,6 +121,7 @@ struct ReaderView: NSViewRepresentable {
                   webView.url?.host == "app", webView.url?.path == "/MacReader/index.html" else { return }
             ready = true
             render(in: webView)
+            if let fraction = lastFraction { lastFraction = nil; scroll(to: fraction, in: webView) }
         }
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

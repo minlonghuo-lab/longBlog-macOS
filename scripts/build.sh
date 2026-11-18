@@ -7,7 +7,7 @@ BUILD="$ROOT/build"
 APP="$BUILD/longBlog.app"
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 MIN_MACOS=14.0
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}"
 BRIDGE="$ROOT/Sources/LongBlog/Core/LongBlog-Bridging-Header.h"
 # Delete only this script's disposable build products, never user documents.
@@ -38,7 +38,8 @@ for ARCH in arm64 x86_64; do
     -o "$BUILD/obj/$ARCH/longBlog"
 done
 xcrun lipo -create "$BUILD/obj/arm64/longBlog" "$BUILD/obj/x86_64/longBlog" -output "$APP/Contents/MacOS/longBlog"
-xcrun lipo "$APP/Contents/MacOS/longBlog" -verify_arch arm64 x86_64
+# One architecture per call: Xcode 27 lipo rejects multiple -verify_arch values.
+for ARCH in arm64 x86_64; do xcrun lipo "$APP/Contents/MacOS/longBlog" -verify_arch "$ARCH"; done
 cp -R Resources/. "$APP/Contents/Resources/"
 python3 scripts/make_plist.py "$APP/Contents/Info.plist" "$VERSION" "$BUILD_NUMBER"
 if [[ -f Resources/AppIcon1024.png ]]; then
@@ -66,7 +67,13 @@ if [[ -f tests/CoreFixtures.m ]]; then
 fi
 xcrun swiftc -swift-version 5 -parse-as-library -sdk "$SDK" Sources/LongBlog/AI/AIWritingService.swift \
   tests/AIEndpointFixtures.swift -o "$BUILD/AIEndpointFixtures"
+xcrun swiftc -swift-version 5 -parse-as-library -sdk "$SDK" Sources/LongBlog/Editor/MarkdownTextView.swift \
+  tests/EditorFixtures.swift -o "$BUILD/EditorFixtures"
+"$BUILD/EditorFixtures"
 "$BUILD/AIEndpointFixtures"
+xcrun swiftc -swift-version 5 -parse-as-library -sdk "$SDK" Sources/LongBlog/Editor/MarkdownTextView.swift \
+  tests/EditorFixtures.swift -o "$BUILD/EditorFixtures"
+"$BUILD/EditorFixtures"
 mkdir -p "$BUILD/dmg-root"
 cp -R "$APP" "$BUILD/dmg-root/longBlog.app"
 ln -s /Applications "$BUILD/dmg-root/Applications"

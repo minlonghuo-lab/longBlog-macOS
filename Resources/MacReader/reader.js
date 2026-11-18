@@ -90,6 +90,8 @@ function sanitize(html, doc, payload) {
     if (node.nodeType === 3) return doc.createTextNode(node.textContent);
     if (node.nodeType !== 1) return null;
     const tag = node.localName.toLowerCase();
+    // GFM task items: render the checkbox state as inert text, never as a form control.
+    if (tag === 'input' && str(node.getAttribute('type')).toLowerCase() === 'checkbox') return doc.createTextNode(node.hasAttribute('checked') ? '☑ ' : '☐ ');
     if (node.namespaceURI !== 'http://www.w3.org/1999/xhtml' || drop.has(tag)) return null;
     if (['audio','video','source','picture'].includes(tag)) return mediaNote('离线预览已禁用音视频及动态媒体。');
     if (!tags.has(tag)) {
@@ -184,6 +186,9 @@ async function render(payload) {
   try {
     if (!payload || typeof payload.body !== 'string' || payload.body.length > MAX_BODY) throw Error('文章超过 4 MiB 预览上限，正文未被截断；请在编辑器中查看。');
     status.hidden=false;status.textContent='';
+    doc.body.classList.toggle('compact', payload.compact === true);
+    const titleNode=doc.getElementById('doc-title');
+    if (titleNode) {const t=typeof payload.title === 'string' ? payload.title.trim().slice(0,500) : '';titleNode.textContent=t;titleNode.hidden=!t;}
     const html=payload.bodyFormat === 'html' ? payload.body : markdownHTML(payload.body);
     const clean=sanitize(html,doc,payload);
     content.replaceChildren(clean);
@@ -225,7 +230,13 @@ if (root.document) {
     // HTTPS is handed to the WKNavigationDelegate, never fetched by the page.
   });
 }
-root.LBMacReader = Object.freeze({render});
+function scrollTo(fraction) {
+  const doc=root.document, el=doc.scrollingElement||doc.documentElement;
+  const f=Math.max(0,Math.min(1,Number(fraction)||0));
+  el.scrollTop=f*Math.max(0,el.scrollHeight-root.innerHeight);
+  return true;
+}
+root.LBMacReader = Object.freeze({render, scrollTo});
 // Pure helpers are also executable under Node without DOM or a package dependency.
 if (typeof module !== 'undefined' && module.exports) module.exports={localImage,externalLink,mathToken,markdownHTML,sanitize,renderMath};
 })(typeof window !== 'undefined' ? window : globalThis);

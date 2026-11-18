@@ -4,36 +4,56 @@ import AppKit
 @main
 struct LongBlogApp: App {
     @NSApplicationDelegateAdaptor(LongBlogAppDelegate.self) private var delegate
+    @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.dark.rawValue
 
+    // The workspace window is owned by the AppDelegate (exactly one, never restored twice).
+    // SwiftUI contributes the menu bar only.
     var body: some Scene {
-        WindowGroup("longBlog") {
-            RootView()
-                .frame(minWidth: 1050, minHeight: 680)
-                .tint(Color(red: 232 / 255, green: 180 / 255, blue: 154 / 255))
-        }
-        .defaultSize(width: 1200, height: 760)
-        .windowStyle(.hiddenTitleBar)
+        Settings { EmptyView() }
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("连接设置…") { post("settings") }.keyboardShortcut(",")
+            }
             CommandGroup(replacing: .newItem) {
                 Button("新建文章") { post("newArticle") }.keyboardShortcut("n")
                 Button("写说说") { post("newMemo") }.keyboardShortcut("n", modifiers: [.command, .shift])
             }
             CommandGroup(after: .saveItem) {
                 Button("保存") { post("save") }.keyboardShortcut("s")
-                Button("审阅待提交文章") { post("review") }.keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("审阅待提交文章…") { post("review") }.keyboardShortcut("p", modifiers: [.command, .shift])
             }
             CommandGroup(after: .textEditing) {
-                Button("编辑所选文章") { post("editArticle") }.keyboardShortcut("e")
+                Button("切换阅读 / 编辑") { post("editArticle") }.keyboardShortcut("e")
                 Button("搜索") { post("search") }.keyboardShortcut("f")
             }
-            CommandGroup(after: .toolbar) {
-                Button("刷新") { post("refresh") }.keyboardShortcut("r")
+            CommandMenu("格式") {
+                ForEach(MarkdownAction.allCases) { action in
+                    let button = Button(action.title) { MarkdownEditorController.focused?.apply(action) }
+                    if let s = action.shortcut { button.keyboardShortcut(s.key, modifiers: s.modifiers) } else { button }
+                    if [.image, .heading3, .taskList, .rule].contains(action) { Divider() }
+                }
             }
-        }
-        Settings {
-            ConnectionSettingsView()
-                .frame(minWidth: 600, minHeight: 560)
-                .tint(Color(red: 232 / 255, green: 180 / 255, blue: 154 / 255))
+            CommandGroup(before: .toolbar) {
+                Button("仪表盘") { post("nav.dashboard") }.keyboardShortcut("1")
+                Button("留言") { post("nav.inbox") }.keyboardShortcut("2")
+                Button("文章") { post("nav.posts") }.keyboardShortcut("3")
+                Button("说说") { post("nav.memos") }.keyboardShortcut("4")
+                Button("站点配置") { post("nav.configuration") }.keyboardShortcut("5")
+                Divider()
+                Button("阅读文章") { post("layout.read") }.keyboardShortcut("r", modifiers: [.command, .option])
+                Button("仅编辑") { post("layout.edit") }.keyboardShortcut("e", modifiers: [.command, .option])
+                Button("编辑 + 实时预览") { post("layout.split") }.keyboardShortcut("p", modifiers: [.command, .option])
+                Divider()
+                Picker("外观", selection: Binding(get: { appearance }, set: { appearance = $0; AppAppearance.apply(AppAppearance(rawValue: $0)) })) {
+                    ForEach(AppAppearance.allCases) { Text($0.title).tag($0.rawValue) }
+                }
+                Button("刷新") { post("refresh") }.keyboardShortcut("r")
+                Divider()
+            }
+            CommandGroup(before: .windowList) {
+                Button("longBlog 主窗口") { (NSApp.delegate as? LongBlogAppDelegate)?.showWorkspace() }.keyboardShortcut("0")
+                Divider()
+            }
         }
     }
 
@@ -47,50 +67,58 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        DispatchQueue.main.async {
-            self.showWorkspaceIfNeeded()
-            let args = ProcessInfo.processInfo.arguments
-            if args.contains("--smoke-test"), let i = args.firstIndex(of: "--smoke-section"), args.indices.contains(i + 1) {
-                let sections: [String: WorkspaceSection] = ["dashboard": .dashboard, "inbox": .inbox, "posts": .posts, "memos": .memos, "configuration": .configuration]
-                if let section = sections[args[i + 1]] { AppModel.shared.navigate(section) }
+        NSWindow.allowsAutomaticWindowTabbing = false
+        AppAppearance.apply()
+        _ = AppModel.shared // installs the single menu-command router
+        showWorkspace()
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("--smoke-test"), let i = args.firstIndex(of: "--smoke-section"), args.indices.contains(i + 1) {
+            let sections: [String: WorkspaceSection] = ["dashboard": .dashboard, "inbox": .inbox, "posts": .posts, "memos": .memos, "configuration": .configuration]
+            if let section = sections[args[i + 1]] { AppModel.shared.navigate(section) }
+        }
+        // Smoke-only: open an unsaved draft filled from a local Markdown file to render the editor.
+        if args.contains("--smoke-test"), let i = args.firstIndex(of: "--smoke-markdown"), args.indices.contains(i + 1),
+           let text = try? String(contentsOfFile: args[i + 1], encoding: .utf8) {
+            AppModel.shared.newArticle()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                let lines = text.components(separatedBy: "\n")
+                AppModel.shared.posts.draft.title = lines.first?.replacingOccurrences(of: "# ", with: "") ?? "示例"
+                AppModel.shared.posts.draft.markdown = lines.dropFirst().joined(separator: "\n")
+                if args.contains("--smoke-read") { AppModel.shared.posts.editing = false }
             }
         }
         NSApp.activate(ignoringOtherApps: true)
-        if ProcessInfo.processInfo.arguments.contains("--smoke-test") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+        if args.contains("--smoke-test") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
                 self.captureSmokeWindow()
             }
         }
     }
 
     @MainActor
-    private func showWorkspaceIfNeeded() {
-        if let existing = NSApp.windows.first(where: {
-            ($0.contentView?.bounds.width ?? 0) >= 1000 && ($0.contentView?.bounds.height ?? 0) >= 600
-        }) {
-            existing.makeKeyAndOrderFront(nil)
-            return
-        }
-        // A handcrafted bundle can receive launch completion before SwiftUI opens
-        // its first scene. Retain an explicit native host instead of starting windowless.
+    func showWorkspace() {
         if workspaceWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                   backing: .buffered, defer: false)
             window.title = "longBlog"
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
-            window.minSize = NSSize(width: 1050, height: 722)
+            window.isRestorable = false
+            window.tabbingMode = .disallowed
+            window.minSize = NSSize(width: 1000, height: 640)
+            window.backgroundColor = .lbBackground
             window.contentView = NSHostingView(rootView: RootView())
             window.center()
+            window.setFrameAutosaveName("LongBlogWorkspace")
             workspaceWindow = window
         }
         workspaceWindow?.makeKeyAndOrderFront(nil)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { showWorkspaceIfNeeded() }
+        if !flag { showWorkspace() }
         return true
     }
 

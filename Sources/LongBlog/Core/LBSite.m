@@ -1,5 +1,6 @@
 #import "LB.h"
 #import "LBMdStore.h"
+#import "LBPlatform.h"
 #import <Security/Security.h>
 #import <CommonCrypto/CommonDigest.h>
 
@@ -11,22 +12,42 @@ NSString *const LBSiteDataDidChange = @"LBSiteDataDidChange";
 
 #pragma mark - Keychain
 @implementation LBKeychain
+// Login-Keychain reads of an ad-hoc signed app can block on a system permission
+// dialog (every new build has a new code signature). Read each item at most once
+// per launch and serve later lookups from memory so the UI never stalls repeatedly.
+static NSMutableDictionary<NSString *, id> *LBKeychainCache(void) {
+  static NSMutableDictionary *cache; static dispatch_once_t once;
+  dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+  return cache;
+}
 + (NSDictionary *)query:(NSString *)account {
   return @{ (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
-            (__bridge id)kSecAttrService : @"com.huowenlong.longblog.macos",
+            (__bridge id)kSecAttrService : LBAppNamespace(),
             (__bridge id)kSecAttrAccount : account };
 }
 + (NSString *)get:(NSString *)account {
-  NSMutableDictionary *q = [[self query:account] mutableCopy];
-  q[(__bridge id)kSecReturnData] = @YES;
-  q[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
-  CFTypeRef out = NULL;
-  if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &out) != errSecSuccess || !out) return nil;
-  return [[NSString alloc] initWithData:(__bridge_transfer NSData *)out encoding:NSUTF8StringEncoding];
+  NSMutableDictionary *cache = LBKeychainCache();
+  @synchronized (cache) {
+    id cached = cache[account];
+    if (cached) return cached == NSNull.null ? nil : cached;
+    NSMutableDictionary *q = [[self query:account] mutableCopy];
+    q[(__bridge id)kSecReturnData] = @YES;
+    q[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
+    CFTypeRef out = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)q, &out);
+    NSString *value = nil;
+    if (status == errSecSuccess && out) value = [[NSString alloc] initWithData:(__bridge_transfer NSData *)out encoding:NSUTF8StringEncoding];
+    else if (out) CFRelease(out);
+    // Denied/cancelled prompts are remembered too: asking again would freeze the UI again.
+    cache[account] = value ?: NSNull.null;
+    return value;
+  }
 }
 + (void)set:(NSString *)value account:(NSString *)account {
   NSString *t = [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
   if ([[self get:account] ?: @"" isEqualToString:t ?: @""]) return;
+  NSMutableDictionary *cache = LBKeychainCache();
+  @synchronized (cache) { [cache removeObjectForKey:account]; }
   if (!t.length) { SecItemDelete((__bridge CFDictionaryRef)[self query:account]); return; }
   NSDictionary *update = @{ (__bridge id)kSecValueData : [t dataUsingEncoding:NSUTF8StringEncoding] };
   OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)[self query:account], (__bridge CFDictionaryRef)update);

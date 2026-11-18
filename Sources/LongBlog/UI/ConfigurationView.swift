@@ -21,7 +21,7 @@ struct StagingReviewView: View {
             TextField("提交说明", text: $model.commitMessage).textFieldStyle(.roundedBorder).disabled(model.busy).accessibilityLabel("文章批量提交说明")
             OperationStatus(model: model)
             HStack { Button("撤销此批暂存…", role: .destructive) { model.revert() }; Spacer(); Text("\(model.frozenReview.count) 项 → 一个 commit → main").font(.caption).foregroundStyle(.secondary); Button("提交到 main…") { model.commit() }.buttonStyle(.borderedProminent) }.disabled(model.busy || model.frozenReview.isEmpty)
-        }.padding(24).frame(width: 740, height: 590).background(Color.blogBackground).preferredColorScheme(.dark).tint(.blogPeach).interactiveDismissDisabled(model.busy)
+        }.padding(24).frame(width: 740, height: 590).background(Color.blogBackground).tint(.blogPeach).interactiveDismissDisabled(model.busy)
     }
     private func action(_ value: String) -> String { switch value { case "publish": return "发布"; case "update": return "更新"; case "unpublish": return "下架"; default: return value } }
 }
@@ -80,7 +80,7 @@ struct ConfigurationWorkspace: View {
             }
             OperationStatus(model: model)
             HStack { Text("保留未改动的行，使用文件 SHA 防止覆盖冲突。").font(.caption).foregroundStyle(.secondary); Spacer(); Button("提交到 main…") { model.commit() }.buttonStyle(.borderedProminent).disabled(model.busy || model.sha.isEmpty) }
-        }.padding(24).frame(width: 780, height: 610).background(Color.blogBackground).preferredColorScheme(.dark).tint(.blogPeach).interactiveDismissDisabled(model.busy)
+        }.padding(24).frame(width: 780, height: 610).background(Color.blogBackground).tint(.blogPeach).interactiveDismissDisabled(model.busy)
     }
 }
 private struct ConfigField: View {
@@ -96,6 +96,6 @@ private struct ConfigField: View {
             else { TextField("字段值", text: value, axis: .vertical).lineLimit(1...5).textFieldStyle(.roundedBorder).accessibilityLabel(field.text("label")) }
             Text(key).font(.caption.monospaced()).foregroundStyle(.tertiary)
             if !field.text("help").isEmpty { Text(field.text("help")).font(.caption).foregroundStyle(.secondary) }
-        }.padding(15).background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 11)).overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(dirty ? Color.blogPeach.opacity(0.6) : .clear))
+        }.padding(15).background(Color.blogSurface, in: RoundedRectangle(cornerRadius: 11)).overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(dirty ? Color.blogPeach.opacity(0.6) : Color.blogStroke))
     }
 }

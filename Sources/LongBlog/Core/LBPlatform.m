@@ -1,11 +1,23 @@
 #import "LBPlatform.h"
 
+static NSString *const LBReleaseNamespace = @"com.huowenlong.longblog.macos";
+NSString *LBAppNamespace(void) {
+  static NSString *ns; static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    NSString *bundle = NSBundle.mainBundle.bundleIdentifier;
+    ns = [bundle hasPrefix:LBReleaseNamespace] ? [bundle copy] : LBReleaseNamespace;
+  });
+  return ns;
+}
+
 NSURL *LBApplicationSupportURL(void) {
   NSURL *support = [NSFileManager.defaultManager URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject;
   // Foundation always supplies this directory on macOS. Do not silently fall
   // back to Documents, the process working directory, or a user's notes folder.
   NSCAssert(support != nil, @"Application Support directory is unavailable");
-  return [support URLByAppendingPathComponent:@"longBlog" isDirectory:YES];
+  NSString *ns = LBAppNamespace(), *name = @"longBlog";
+  if (ns.length > LBReleaseNamespace.length) name = [@"longBlog-" stringByAppendingString:[ns substringFromIndex:LBReleaseNamespace.length + 1]];
+  return [support URLByAppendingPathComponent:name isDirectory:YES];
 }
 
 BOOL LBProtectLocalURL(NSURL *url, NSError **error) {

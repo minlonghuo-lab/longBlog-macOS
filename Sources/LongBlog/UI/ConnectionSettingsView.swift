@@ -12,7 +12,7 @@ struct ConnectionSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var values: [String: String]
     @State private var baseline: [String: String]
-    @State private var importingFolder = false
+    @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.dark.rawValue
     init() {
         let current = LBUIConnectionSettings().compactMapValues { $0 as? String }
         _values = State(initialValue: current); _baseline = State(initialValue: current)
@@ -45,8 +45,27 @@ struct ConnectionSettingsView: View {
                     Text("本站公开说说镜像与 Memos 私有账户分离。请保存后显式验证账户；401 不会自动重试。").font(.caption).foregroundStyle(.secondary)
                 }
                 Section("文章工作区") {
-                    HStack { Text(values["folder"] ?? "Posts"); Spacer(); Button("选择文件夹…") { chooseFolder() }.disabled(locked) }
-                    Text("默认使用 Application Support/longBlog/Posts。外部文件夹使用安全作用域书签。选择目录不会自动迁移、删除或提交文章。").font(.caption).foregroundStyle(.secondary)
+                    HStack(spacing: 10) {
+                        Image(systemName: values["customFolder"] == "1" ? "folder.fill" : "internaldrive").foregroundStyle(Color.blogPeach)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(values["folder"] ?? "Posts").lineLimit(1)
+                            if let path = values["folderPath"], !path.isEmpty {
+                                Text(path).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                            }
+                        }
+                        Spacer()
+                        if values["customFolder"] == "1" {
+                            Button("在 Finder 中显示") { if let path = values["folderPath"] { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } }
+                            Button("恢复默认") { resetFolder() }.disabled(locked)
+                        }
+                        Button("选择文件夹…") { chooseFolder() }.disabled(locked)
+                    }
+                    Text("默认使用 Application Support/longBlog/Posts。外部文件夹使用安全作用域书签。选择目录不会自动迁移、删除或提交文章；建议选择空目录或此前由 longBlog 同步的目录。").font(.caption).foregroundStyle(.secondary)
+                }
+                Section("外观") {
+                    Picker("界面外观", selection: Binding(get: { appearance }, set: { appearance = $0; AppAppearance.apply(AppAppearance(rawValue: $0)) })) {
+                        ForEach(AppAppearance.allCases) { Text($0.title).tag($0.rawValue) }
+                    }.pickerStyle(.segmented)
                 }
                 Section("AI 写作") {
                     Text("在文章编辑器点“AI 写作”，独立设置 HTTPS 接口、模型和 Keychain 密钥。生成结果只有在编辑快照未变化时才能应用。").font(.callout).foregroundStyle(.secondary)
@@ -60,28 +79,46 @@ struct ConnectionSettingsView: View {
                 Spacer()
                 Button("保存连接…") { save() }.buttonStyle(.borderedProminent).disabled(locked || !dirty)
             }.padding(18)
-        }.frame(width: 720, height: 730).background(Color.blogBackground).preferredColorScheme(.dark).tint(.blogPeach)
+        }.frame(width: 720, height: 760).background(Color.blogBackground).tint(.blogPeach)
             .interactiveDismissDisabled(dirty || status.busy)
-            .fileImporter(isPresented: $importingFolder, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
-                switch result {
-                case .success(let urls): if let url = urls.first {
-                    app.confirm("绑定文章工作区？", "所选文件夹将用作本地文章目录。不会自动迁移或上传文件。", button: "绑定") {
-                        status.run("folder", "settings.folder", ["url":url], success: "文章工作区已绑定；可在文章板块手动同步。") { _ in
-                            let current = LBUIConnectionSettings(); values["folder"] = current["folder"] as? String ?? "Posts"; baseline["folder"] = values["folder"]; posts.refresh()
-                        }
-                    }
-                }
-                case .failure(let error): status.errors["folder"] = error.localizedDescription
-                }
-            }
     }
     private func close() {
         if dirty { app.confirm("放弃尚未保存的连接修改？", "已保存的 Keychain 和服务配置不受影响。", button: "放弃并关闭", destructive: true) { dismiss() } }
         else { dismiss() }
     }
+    /// Native open panel attached to the Settings sheet itself. SwiftUI's fileImporter
+    /// inside a sheet, followed by an alert on the (sheet-covered) main window, queued the
+    /// confirmation invisibly and left the whole UI locked — the reported folder "hang".
     private func chooseFolder() {
         guard app.dirtyNames.isEmpty else { status.errors["folder"] = "请先保存或放弃编辑中的\(app.dirtyNames.joined(separator: "、"))，再更换工作区。"; return }
-        importingFolder = true
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true; panel.prompt = "选择"; panel.message = "选择用于保存 longBlog 文章的本地文件夹"
+        if let path = values["folderPath"], !path.isEmpty { panel.directoryURL = URL(fileURLWithPath: path) }
+        let handle: (NSApplication.ModalResponse) -> Void = { response in
+            guard response == .OK, let url = panel.url else { return }
+            // Let the panel finish closing before presenting the confirmation sheet.
+            DispatchQueue.main.async { confirmFolder(url) }
+        }
+        if let host = AlertHost.window { panel.beginSheetModal(for: host, completionHandler: handle) } else { handle(panel.runModal()) }
+    }
+    private func confirmFolder(_ url: URL) {
+        app.confirm("绑定文章工作区？", "\(url.path)\n\n所选文件夹将用作本地文章目录。不会自动迁移或上传文件；首次同步前请备份。", button: "绑定") {
+            status.run("folder", "settings.folder", ["url": url], success: "文章工作区已绑定；可在文章板块手动同步。") { _ in folderChanged() }
+        }
+    }
+    private func resetFolder() {
+        guard app.dirtyNames.isEmpty else { status.errors["folder"] = "请先保存或放弃编辑中的\(app.dirtyNames.joined(separator: "、"))，再更换工作区。"; return }
+        app.confirm("恢复默认文章目录？", "改回 Application Support/longBlog/Posts。外部文件夹中的文件保持不动。", button: "恢复默认") {
+            status.run("folder", "settings.resetFolder", [:], success: "已恢复默认文章目录。") { _ in folderChanged() }
+        }
+    }
+    private func folderChanged() {
+        let current = LBUIConnectionSettings().compactMapValues { $0 as? String }
+        for key in ["folder", "folderPath", "customFolder"] { values[key] = current[key]; baseline[key] = current[key] }
+        // Drop every buffer that belonged to the previous folder before listing the new one.
+        posts.resetBuffer(); posts.articles = []; posts.staged = []; posts.loaded = false; posts.clearMessages()
+        posts.refresh()
     }
     private func save() {
         guard !locked else { return }

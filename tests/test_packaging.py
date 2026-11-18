@@ -22,11 +22,12 @@ class PackagingTests(unittest.TestCase):
     def test_clean_universal_build(self):
         script = (ROOT / 'scripts/build.sh').read_text()
         self.assertIn('for ARCH in arm64 x86_64', script)
-        self.assertIn('lipo "$APP/Contents/MacOS/longBlog" -verify_arch arm64 x86_64', script)
+        self.assertIn('lipo "$APP/Contents/MacOS/longBlog" -verify_arch "$ARCH"', script)
         self.assertIn('rm -rf "$BUILD/obj"', script)
         self.assertIn('codesign --verify --deep --strict', script)
         self.assertIn('hdiutil verify', script)
         self.assertIn('"$BUILD/CoreFixtures"', script)
+        self.assertIn('"$BUILD/EditorFixtures"', script)
 
     def test_actions_limits_permissions_and_real_smoke_test(self):
         workflow = (ROOT / '.github/workflows/macos.yml').read_text()

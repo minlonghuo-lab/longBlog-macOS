@@ -27,12 +27,37 @@ func dateLabel(_ value: Double, milliseconds: Bool = true) -> String {
             // Core and bridge both guarantee main-queue completions.
             guard let self = self else { return }
             self.running.remove(key)
+            defer { self.drainIdleActions() }
             if let error = error { self.errors[key] = error.localizedDescription; return }
-            if let success = success { self.successes[key] = success }
+            if let success = success { self.flash(key, success) }
             done(result ?? [:])
         }
     }
     func clearMessages() { errors = [:]; successes = [:] }
+    private var idleActions: [() -> Void] = []
+    /// Runs now, or right after the current requests finish (e.g. ⌘N while the list loads)
+    /// instead of silently ignoring the command.
+    func whenIdle(_ action: @escaping () -> Void) {
+        if busy { idleActions.append(action) } else { action() }
+    }
+    private func drainIdleActions() {
+        guard !busy, !idleActions.isEmpty else { return }
+        let actions = idleActions; idleActions = []
+        actions.forEach { $0() }
+    }
+    /// Success notes are transient toasts; errors stay until dismissed.
+    func flash(_ key: String, _ text: String) {
+        successes[key] = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+            if self?.successes[key] == text { self?.successes[key] = nil }
+        }
+    }
+    static func label(_ key: String) -> String {
+        ["list": "读取列表", "load": "读取", "save": "保存", "new": "新建", "stage": "暂存", "sync": "同步", "commit": "提交",
+         "revert": "撤销", "attachment": "导入附件", "dashboard": "读取状态", "sessions": "读取会话", "messages": "读取消息",
+         "read": "标记已读", "contact": "联系信息", "reply": "发送回复", "identity": "验证账户", "update": "更新",
+         "upload": "上传附件", "download": "下载附件", "preview": "生成预览", "folder": "绑定目录"][key] ?? key
+    }
 }
 
 struct PendingConfirmation: Identifiable {
@@ -62,7 +87,19 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     let inbox = InboxModel()
     let memos = MemosModel()
     let configuration = ConfigurationModel()
-    private init() {}
+    private var commandObservers: [NSObjectProtocol] = []
+    static let commandNames = ["newArticle", "newMemo", "save", "review", "refresh", "search", "editArticle",
+                               "nav.dashboard", "nav.inbox", "nav.posts", "nav.memos", "nav.configuration", "settings",
+                               "layout.read", "layout.edit", "layout.split"]
+    /// Menu commands are routed ONCE here (not per view), so a second window or a
+    /// re-created RootView can never execute ⌘N / ⌘S twice.
+    private init() {
+        commandObservers = Self.commandNames.map { name in
+            NotificationCenter.default.addObserver(forName: Notification.Name("longBlog." + name), object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { AppModel.shared.route(name) }
+            }
+        }
+    }
     var connectionLocked: Bool { posts.busy || inbox.busy || memos.busy || configuration.busy || dashboard.busy || showingReview || confirmation != nil }
     func resetConnectionViews() {
         posts.resetBuffer(); posts.articles = []; posts.staged = []; posts.loaded = false; posts.clearMessages()
@@ -79,8 +116,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         guard !dirtyNames.isEmpty else { completion(true); return }
         let alert = NSAlert(); alert.messageText = "仍有未保存的修改"; alert.informativeText = dirtyNames.joined(separator: "、") + "尚未保存。退出将丢失编辑缓冲区。"
         alert.addButton(withTitle: "继续编辑"); alert.addButton(withTitle: "放弃并退出")
-        let finish: (NSApplication.ModalResponse) -> Void = { completion($0 == .alertSecondButtonReturn) }
-        if let window = NSApp.keyWindow { alert.beginSheetModal(for: window, completionHandler: finish) } else { finish(alert.runModal()) }
+        AlertHost.present(alert) { completion($0 == .alertSecondButtonReturn) }
     }
     var dirtyNames: [String] {
         var result: [String] = []
@@ -98,8 +134,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
             self.confirmation = nil
             if response == .alertSecondButtonReturn { action() }
         }
-        if let window = NSApp.keyWindow { alert.beginSheetModal(for: window, completionHandler: finish) }
-        else { finish(alert.runModal()) }
+        AlertHost.present(alert, completion: finish)
     }
     func navigate(_ target: WorkspaceSection) { section = target; refreshIfNeeded() }
     // Editors are retained across section switches. Selection changes are separately confirmed.
@@ -121,10 +156,31 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     func refresh() {
         switch section { case .dashboard: dashboard.refresh(); case .posts: posts.refresh(); case .inbox: inbox.refresh(); case .memos: memos.refresh(); case .configuration: configuration.refresh() }
     }
-    func editArticle() { navigate(.posts); posts.editing = true }
-    func search() { searchRequested = UUID() }
+    func editArticle() {
+        navigate(.posts)
+        guard !posts.draft.id.isEmpty else { return }
+        posts.editing.toggle()
+    }
+    func search() {
+        // Inside the Markdown editor ⌘F opens the in-document find bar instead.
+        if let editor = MarkdownEditorController.focused {
+            let item = NSMenuItem(); item.tag = Int(NSTextFinder.Action.showFindInterface.rawValue)
+            editor.performTextFinderAction(item); return
+        }
+        searchRequested = UUID()
+    }
     func route(_ name: String) {
-        switch name { case "newArticle": newArticle(); case "newMemo": newMemo(); case "save": save(); case "review": review(); case "refresh": refresh(); case "search": search(); case "editArticle": editArticle(); default: break }
+        switch name {
+        case "newArticle": newArticle(); case "newMemo": newMemo(); case "save": save(); case "review": review()
+        case "refresh": refresh(); case "search": search(); case "editArticle": editArticle()
+        case "settings": showingSettings = true
+        case "nav.dashboard": navigate(.dashboard); case "nav.inbox": navigate(.inbox); case "nav.posts": navigate(.posts)
+        case "nav.memos": navigate(.memos); case "nav.configuration": navigate(.configuration)
+        case "layout.read": if section == .posts, !posts.draft.id.isEmpty { posts.editing = false }
+        case "layout.edit": if section == .posts, !posts.draft.id.isEmpty { posts.editing = true; posts.splitPreview = false }
+        case "layout.split": if section == .posts, !posts.draft.id.isEmpty { posts.editing = true; posts.splitPreview = true }
+        default: break
+        }
     }
 }
 
@@ -152,6 +208,9 @@ struct PostDraft: Equatable {
     @Published var staged: [[String: Any]] = []
     @Published var draft = PostDraft()
     @Published var editing = false
+    @Published var splitPreview = UserDefaults.standard.object(forKey: "lb.editor.split") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(splitPreview, forKey: "lb.editor.split") }
+    }
     @Published var filter = "全部"
     @Published var search = ""
     @Published var folder = "Posts"
@@ -160,6 +219,7 @@ struct PostDraft: Equatable {
     @Published var commitMessage = "Update articles from longBlog macOS"
     private var saved = PostDraft()
     var isDirty: Bool { draft != saved }
+    var stagedIDs: Set<String> { Set(staged.compactMap { $0["id"] as? String }) }
     var filtered: [DataRow] { articles.filter { (filter == "全部" || ($0.flag("publish") ? filter == "已发布" : filter == "草稿")) && (search.isEmpty || $0.text("title").localizedCaseInsensitiveContains(search) || $0.text("summary").localizedCaseInsensitiveContains(search)) } }
     func resetBuffer() { draft = PostDraft(); saved = draft; editing = false; frozenReview = [] }
     func reloadCurrent() {
@@ -169,7 +229,7 @@ struct PostDraft: Equatable {
     }
     func refresh() { run("list", "posts.list") { self.articles = rows($0["rows"]); self.staged = $0["staged"] as? [[String: Any]] ?? []; self.folder = $0["folder"] as? String ?? "Posts"; self.loaded = true } }
     func discardThen(_ action: @escaping () -> Void) {
-        guard !busy else { return }
+        guard !busy else { whenIdle { self.discardThen(action) }; return }
         if isDirty { AppModel.shared.confirm("放弃未保存的文章修改？", "当前编辑缓冲区将被替换。本地已保存文件不受影响。", button: "放弃修改", destructive: true, action: action) } else { action() }
     }
     func select(_ row: DataRow) {
@@ -220,16 +280,27 @@ struct PostDraft: Equatable {
             }
         }
     }
-    func importFile(_ url: URL) {
-        guard !busy, !draft.id.isEmpty else { return }
+    /// Copies files into the article's asset folder. A dirty draft is saved first so the
+    /// assets land in the stable per-article directory. Markdown is inserted at the caret.
+    func importFiles(_ urls: [URL], insert: ((String) -> Void)? = nil) {
+        guard !busy, !draft.id.isEmpty, !urls.isEmpty else { return }
+        if isDirty {
+            guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { errors["attachment"] = "请先填写文章标题，保存后才能导入附件。"; return }
+            save { self.importFiles(urls, insert: insert) }
+            return
+        }
+        var remaining = urls
+        let first = remaining.removeFirst()
         let id = draft.id
-        run("attachment", "posts.import", ["id":id, "url":url], success: "附件已复制到文章资源目录；请保存文章并审阅提交。") { result in
+        run("attachment", "posts.import", ["id":id, "url":first], success: "附件已复制到文章资源目录；保存后随文章一起审阅提交。") { result in
             guard self.draft.id == id, let path = result["path"] as? String else { return }
             let name = (result["filename"] as? String ?? "附件").replacingOccurrences(of: "]", with: "\\]")
             let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-            let image = ["png", "jpg", "jpeg", "gif", "webp", "heic", "svg"].contains(url.pathExtension.lowercased())
-            self.draft.markdown += "\n\(image ? "!" : "")[\(name)](\(encoded))\n"
+            let image = ["png", "jpg", "jpeg", "gif", "webp", "heic", "svg"].contains(first.pathExtension.lowercased())
+            let snippet = "\(image ? "!" : "")[\(name)](\(encoded))\n"
+            if let insert = insert { insert(snippet) } else { self.draft.markdown += "\n" + snippet }
             self.draft.directory = result["directory"] as? URL
+            if !remaining.isEmpty { DispatchQueue.main.async { self.importFiles(remaining, insert: insert) } }
         }
     }
 }
@@ -319,7 +390,7 @@ struct PostDraft: Equatable {
         savedContent = content; savedVisibility = visibility; savedResourceIDs = resourceIDs; editing = true
     }
     func discardThen(_ action: @escaping () -> Void) {
-        guard !busy else { return }
+        guard !busy else { whenIdle { self.discardThen(action) }; return }
         if isDirty { AppModel.shared.confirm("放弃说说编辑？", "未保存的正文和附件关联将被丢弃。已上传到服务端的孤立附件不会被自动删除。", button: "放弃编辑", destructive: true, action: action) } else { action() }
     }
     func newMemo() { discardThen { self.assign(nil); self.archived = false } }
@@ -357,6 +428,7 @@ struct PostDraft: Equatable {
             self.run("update", "memos.update", ["original":original, "fields":fields], success: "说说状态已更新。") { self.assign($0); self.load() }
         }
     }
+    func importFiles(_ urls: [URL]) { if let url = urls.first { importFile(url) } }
     func importFile(_ url: URL) {
         guard !busy, editing else { return }
         AppModel.shared.confirm("上传附件到 Memos？", "将上传 \(url.lastPathComponent)。上传后仍需保存说说才能关联；取消编辑不会自动删除服务端附件。", button: "上传") {

@@ -2,7 +2,6 @@
 #import <Security/Security.h>
 
 NSString *const LBDefaultAPIBase = @"https://shuoshuo.huowenlong.com/terminal-chat";
-static NSString *const kKeychainService = @"com.huowenlong.longblog.macos";
 static NSString *const kKeychainAccount = @"owner-key";
 static NSString *const kBaseDefaults = @"LBAPIBase";
 
@@ -94,34 +93,14 @@ static BOOL LBInteger(id value, long long minimum, long long maximum) {
 }
 
 #pragma mark Keychain
-- (NSDictionary *)keyQuery {
-  return @{ (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
-            (__bridge id)kSecAttrService : kKeychainService,
-            (__bridge id)kSecAttrAccount : kKeychainAccount };
-}
-- (NSString *)ownerKey {
-  NSMutableDictionary *q = [[self keyQuery] mutableCopy];
-  q[(__bridge id)kSecReturnData] = @YES;
-  q[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
-  CFTypeRef out = NULL;
-  if (SecItemCopyMatching((__bridge CFDictionaryRef)q, &out) != errSecSuccess || !out) return nil;
-  NSData *d = (__bridge_transfer NSData *)out;
-  return [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-}
+// Shared cached LBKeychain (same service namespace) so a permission prompt cannot
+// be triggered on every `configured` check from the main thread.
+- (NSString *)ownerKey { return [LBKeychain get:kKeychainAccount]; }
 - (void)setOwnerKey:(NSString *)ownerKey {
   NSString *t = [ownerKey stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
   if ([self.ownerKey ?: @"" isEqualToString:t ?: @""]) return;
   _generation++;
-  if (!t.length) { SecItemDelete((__bridge CFDictionaryRef)[self keyQuery]); return; }
-  NSDictionary *update = @{ (__bridge id)kSecValueData : [t dataUsingEncoding:NSUTF8StringEncoding] };
-  OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)[self keyQuery], (__bridge CFDictionaryRef)update);
-  if (status == errSecSuccess || status != errSecItemNotFound) return;
-  NSMutableDictionary *q = [[self keyQuery] mutableCopy];
-  q[(__bridge id)kSecValueData] = [t dataUsingEncoding:NSUTF8StringEncoding];
-  // macOS login Keychain access follows its unlock state and item ACL.
-  // Do not set iOS-only data-protection accessibility attributes.
-  q[(__bridge id)kSecAttrSynchronizable] = @NO;
-  SecItemAdd((__bridge CFDictionaryRef)q, NULL);
+  [LBKeychain set:t account:kKeychainAccount];
 }
 - (NSUInteger)connectionRevision { return _generation; }
 - (BOOL)configured { return self.ownerKey.length > 0; }

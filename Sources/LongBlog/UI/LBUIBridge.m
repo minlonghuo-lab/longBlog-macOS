@@ -16,7 +16,9 @@ static dispatch_queue_t ArticleQueue(void) {
 NSDictionary *LBUIConnectionSettings(void) {
     return @{ @"site":LBStore.siteURL ?: @"", @"repo":LBStore.repo ?: @"", @"hosts":[LBStore.certHosts componentsJoinedByString:@", "],
         @"githubToken":LBGitHub.shared.token ?: @"", @"inboxURL":LBAPI.shared.baseURL ?: @"", @"inboxToken":LBAPI.shared.ownerKey ?: @"",
-        @"memosURL":LBMemosClient.shared.baseURL ?: @"", @"memosToken":LBMemosClient.shared.token ?: @"", @"folder":LBMdStore.shared.folderDisplayName ?: @"Posts" };
+        @"memosURL":LBMemosClient.shared.baseURL ?: @"", @"memosToken":LBMemosClient.shared.token ?: @"", @"folder":LBMdStore.shared.folderDisplayName ?: @"Posts",
+        @"folderPath":LBMdStore.shared.isCustomFolder ? (LBMdStore.shared.articlesFolderURL.path ?: @"") : @"",
+        @"customFolder":LBMdStore.shared.isCustomFolder ? @"1" : @"" };
 }
 static NSDictionary *Message(LBMessage *m) {
     return @{ @"id":m.mid ?: @"", @"text":m.text ?: @"", @"visitor":@([m fromVisitor]), @"createdAt":@(m.createdAt), @"sequence":@(m.sequence), @"pending":@(m.pending), @"failed":@(m.failed) };
@@ -146,8 +148,17 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
             if (sha && !e) [LBSiteData.shared didCommitEnv:edited commit:sha]; Finish(done,sha ? @{@"commit":sha, @"text":edited} : nil,e);
         }]; return;
     }
-    if ([op isEqual:@"settings.folder"]) {
-        NSError *error = nil; BOOL ok = [store setFolderURL:a[@"url"] error:&error]; Finish(done,ok ? @{} : nil,error); return;
+    if ([op isEqual:@"settings.folder"] || [op isEqual:@"settings.resetFolder"]) {
+        // Barrier behind any in-flight list/load on the serial article queue so the folder never
+        // changes underneath a scan; the store mutation itself stays on main like every reader.
+        NSURL *url = a[@"url"];
+        dispatch_async(ArticleQueue(), ^{
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                NSError *error = nil; BOOL ok = YES;
+                if (url) ok = [store setFolderURL:url error:&error]; else [store resetFolderToDefault];
+                Finish(done, ok ? @{} : nil, error);
+            });
+        }); return;
     }
     if ([op isEqual:@"settings.save"]) {
         NSString *site = [a[@"site"] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
