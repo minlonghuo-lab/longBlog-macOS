@@ -102,6 +102,7 @@ static BOOL LBInteger(id value, long long minimum, long long maximum) {
   _generation++;
   [LBKeychain set:t account:kKeychainAccount];
 }
+- (void)noteCredentialChange { _generation++; }
 - (NSUInteger)connectionRevision { return _generation; }
 - (BOOL)configured { return self.ownerKey.length > 0; }
 
