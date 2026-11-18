@@ -23,6 +23,7 @@ struct AIWritingSheet: View {
     @AppStorage("lb.ai.baseURL") private var baseURL = ""
     @AppStorage("lb.ai.model") private var model = ""
     @State private var apiKey = ""
+    @State private var keySavedHint = ""
     @State private var action: WritingAction = .summarize
     @State private var output = ""
     @State private var error = ""
@@ -32,53 +33,119 @@ struct AIWritingSheet: View {
     @State private var requestID = UUID()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 15) {
             HStack {
-                Label("AI 写作辅助", systemImage: "sparkles").font(.title2.bold())
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles").foregroundStyle(Color.blogPeach)
+                    Text("AI 写作辅助").font(.system(size: 19, weight: .bold))
+                }
                 Spacer()
-                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("关闭") { dismiss() }
+                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                    .keyboardShortcut(.cancelAction)
             }
+
             DisclosureGroup("接口设置（API Key 仅保存到 macOS Keychain）") {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("HTTPS Base URL，例如 https://example.com/v1", text: $baseURL)
-                    TextField("模型名称", text: $model)
-                    SecureField("API Key", text: $apiKey)
-                    Button("保存 API Key") { saveKey() }.disabled(busy)
-                }.padding(.top, 8)
+                VStack(alignment: .leading, spacing: 9) {
+                    TextField("HTTPS Base URL，例如 https://api.openai.com/v1", text: $baseURL)
+                        .textFieldStyle(.roundedBorder)
+                    HStack(spacing: 10) {
+                        TextField("模型名称（如 gpt-4o-mini）", text: $model)
+                            .textFieldStyle(.roundedBorder)
+                        SecureField("API Key", text: $apiKey)
+                            .textFieldStyle(.roundedBorder)
+                        Button("保存密钥") { saveKey() }
+                            .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                            .disabled(busy)
+                    }
+                    if !keySavedHint.isEmpty {
+                        Text(keySavedHint).font(.system(size: 11.5)).foregroundStyle(Color.blogGreen)
+                    }
+                }
+                .padding(.top, 8)
             }
-            Picker("操作", selection: $action) {
-                ForEach(WritingAction.allCases) { item in Text(item.rawValue).tag(item) }
-            }.pickerStyle(.segmented).disabled(busy)
-            Text("点击生成将把本文标题、正文及摘要发送给你配置的 AI 服务。请确认服务商的数据政策；结果仅预览，应用后仍须自行保存，不会自动发布。")
-                .font(.caption).foregroundStyle(.secondary)
-            if !error.isEmpty { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            if busy { ProgressView("正在生成，可随时取消…").controlSize(.small) }
+            .font(.system(size: 12.5, weight: .medium))
+
+            BlogSegmentedControl(
+                options: WritingAction.allCases.map { SegmentedOption(value: $0, label: $0.rawValue) },
+                selection: $action
+            )
+            .disabled(busy)
+
+            Text("点击“生成预览”会把本文标题、正文及摘要发送至你配置的 HTTPS 模型端点。生成内容可在下方直接审校修改，应用后仍需手动保存。")
+                .font(.system(size: 12))
+                .foregroundStyle(Color.blogMuted)
+
+            if !error.isEmpty {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Color.blogAmber)
+                    .textSelection(.enabled)
+            }
+
+            if busy {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在流式生成，可随时取消…")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color.blogSecondary)
+                }
+            }
+
             TextEditor(text: $output)
-                .font(.system(.body, design: .monospaced))
-                .frame(minHeight: 260)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.25)))
+                .font(.system(size: 13.5, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(10)
+                .frame(minHeight: 250)
+                .background(Color.blogEditor, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.blogStroke))
                 .accessibilityLabel("AI 生成结果预览，可在应用前修改")
+
             HStack {
-                if busy { Button("取消生成") { cancel() } }
+                if busy {
+                    Button("取消生成") { cancel() }
+                        .buttonStyle(BlogSecondaryButtonStyle())
+                } else if !output.isEmpty {
+                    Text("生成结果共 \(TextStats.words(output)) 字")
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Color.blogMuted)
+                }
                 Spacer()
-                Button("生成预览") { generate() }.disabled(busy)
+                Button("生成预览") { generate() }
+                    .buttonStyle(BlogSecondaryButtonStyle())
+                    .disabled(busy)
                 Button("应用到编辑器") {
                     onApply(action.target, output)
                     dismiss()
-                }.buttonStyle(.borderedProminent).disabled(busy || !completed || output.isEmpty)
+                }
+                .buttonStyle(BlogPrimaryButtonStyle())
+                .disabled(busy || !completed || output.isEmpty)
             }
         }
-        .padding(24).frame(width: 740, height: 620)
-        .onAppear { apiKey = LBKeychain.get("ai-api-key") ?? "" }
+        .padding(24)
+        .frame(width: 740, height: 620)
+        .foregroundStyle(Color.blogText)
+        .background(Color.blogBackground)
+        .tint(.blogPeach)
+        .task {
+            LBUIRequest("ai.key.load", [:]) { result, _ in
+                self.apiKey = result?["key"] as? String ?? ""
+            }
+        }
         .onDisappear { cancel() }
         .onChange(of: action) { _, _ in output = ""; error = ""; completed = false }
     }
 
     private func saveKey() {
-        LBKeychain.set(apiKey.isEmpty ? nil : apiKey, account: "ai-api-key")
-        if (LBKeychain.get("ai-api-key") ?? "") != apiKey {
-            error = "Keychain 保存失败，请检查系统授权；API Key 未写入普通设置。"
-        } else { error = "" }
+        keySavedHint = ""
+        LBUIRequest("ai.key.save", ["key": apiKey]) { _, err in
+            if let err = err {
+                self.error = err.localizedDescription
+            } else {
+                self.error = ""
+                self.keySavedHint = apiKey.isEmpty ? "已从 Keychain 清除密钥。" : "API Key 已安全存入 Keychain。"
+            }
+        }
     }
 
     private func cancel() {

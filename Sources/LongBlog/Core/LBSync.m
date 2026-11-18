@@ -50,6 +50,7 @@ static NSString *const kBaseline = @"LBBaselineDone";
   [NSNotificationCenter.defaultCenter postNotificationName:LBSyncDidChange object:self];
 }
 - (void)resetBaseline {
+  [self stopForegroundPolling];
   _generation++;
   _inFlight = NO;
   [NSUserDefaults.standardUserDefaults removeObjectForKey:kBaseline];
@@ -128,7 +129,7 @@ static NSString *const kBaseline = @"LBBaselineDone";
 
 #pragma mark Scheduling
 - (void)startForegroundPolling {
-  [_timer invalidate];
+  if (_timer.valid) return;
   _timer = [NSTimer scheduledTimerWithTimeInterval:12 repeats:YES block:^(NSTimer *t) { [self refresh:nil]; }];
   _timer.tolerance = 3;
   [self refresh:nil];

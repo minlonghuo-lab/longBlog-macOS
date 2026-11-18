@@ -11,14 +11,30 @@ static NSNumber *num(id v) { return [v isKindOfClass:NSNumber.class] ? v : @0; }
 NSString *const LBSiteDataDidChange = @"LBSiteDataDidChange";
 
 #pragma mark - Keychain
+@interface LBKeychainEntry : NSObject
+@property (nonatomic, strong) id cachedValue;
+@end
+@implementation LBKeychainEntry
+@end
+
 @implementation LBKeychain
 // Login-Keychain reads of an ad-hoc signed app can block on a system permission
 // dialog (every new build has a new code signature). Read each item at most once
 // per launch and serve later lookups from memory so the UI never stalls repeatedly.
-static NSMutableDictionary<NSString *, id> *LBKeychainCache(void) {
-  static NSMutableDictionary *cache; static dispatch_once_t once;
-  dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
-  return cache;
+static LBKeychainEntry *LBEntryForAccount(NSString *account) {
+  static NSMutableDictionary<NSString *, LBKeychainEntry *> *entries;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{ entries = [NSMutableDictionary dictionary]; });
+  @synchronized (entries) {
+    LBKeychainEntry *entry = entries[account];
+    if (!entry) entries[account] = entry = [LBKeychainEntry new];
+    return entry;
+  }
+}
+static BOOL LBSmokeTestMode(void) {
+  static BOOL smoke; static dispatch_once_t once;
+  dispatch_once(&once, ^{ smoke = [NSProcessInfo.processInfo.arguments containsObject:@"--smoke-test"]; });
+  return smoke;
 }
 + (NSDictionary *)query:(NSString *)account {
   return @{ (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
@@ -26,9 +42,10 @@ static NSMutableDictionary<NSString *, id> *LBKeychainCache(void) {
             (__bridge id)kSecAttrAccount : account };
 }
 + (NSString *)get:(NSString *)account {
-  NSMutableDictionary *cache = LBKeychainCache();
-  @synchronized (cache) {
-    id cached = cache[account];
+  if (LBSmokeTestMode()) return nil;
+  LBKeychainEntry *entry = LBEntryForAccount(account);
+  @synchronized (entry) {
+    id cached = entry.cachedValue;
     if (cached) return cached == NSNull.null ? nil : cached;
     NSMutableDictionary *q = [[self query:account] mutableCopy];
     q[(__bridge id)kSecReturnData] = @YES;
@@ -39,25 +56,36 @@ static NSMutableDictionary<NSString *, id> *LBKeychainCache(void) {
     if (status == errSecSuccess && out) value = [[NSString alloc] initWithData:(__bridge_transfer NSData *)out encoding:NSUTF8StringEncoding];
     else if (out) CFRelease(out);
     // Denied/cancelled prompts are remembered too: asking again would freeze the UI again.
-    cache[account] = value ?: NSNull.null;
+    entry.cachedValue = value ?: NSNull.null;
     return value;
   }
 }
 + (void)set:(NSString *)value account:(NSString *)account {
+  if (LBSmokeTestMode()) return;
   NSString *t = [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-  if ([[self get:account] ?: @"" isEqualToString:t ?: @""]) return;
-  NSMutableDictionary *cache = LBKeychainCache();
-  @synchronized (cache) { [cache removeObjectForKey:account]; }
-  if (!t.length) { SecItemDelete((__bridge CFDictionaryRef)[self query:account]); return; }
-  NSDictionary *update = @{ (__bridge id)kSecValueData : [t dataUsingEncoding:NSUTF8StringEncoding] };
-  OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)[self query:account], (__bridge CFDictionaryRef)update);
-  if (status != errSecItemNotFound) return;
-  NSMutableDictionary *q = [[self query:account] mutableCopy];
-  q[(__bridge id)kSecValueData] = [t dataUsingEncoding:NSUTF8StringEncoding];
-  // macOS login Keychain access follows its unlock state and item ACL.
-  // Do not set iOS-only data-protection accessibility attributes.
-  q[(__bridge id)kSecAttrSynchronizable] = @NO;
-  SecItemAdd((__bridge CFDictionaryRef)q, NULL);
+  LBKeychainEntry *entry = LBEntryForAccount(account);
+  @synchronized (entry) {
+    NSString *previous = [self get:account];
+    if ([previous ?: @"" isEqualToString:t ?: @""]) return;
+    if (!t.length) {
+      OSStatus status = SecItemDelete((__bridge CFDictionaryRef)[self query:account]);
+      entry.cachedValue = (status == errSecSuccess || status == errSecItemNotFound) ? NSNull.null : (previous ?: NSNull.null);
+      return;
+    }
+    NSData *data = [t dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) { entry.cachedValue = previous ?: NSNull.null; return; }
+    NSDictionary *update = @{ (__bridge id)kSecValueData : data };
+    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)[self query:account], (__bridge CFDictionaryRef)update);
+    if (status == errSecSuccess) { entry.cachedValue = [t copy]; return; }
+    if (status != errSecItemNotFound) { entry.cachedValue = previous ?: NSNull.null; return; }
+    NSMutableDictionary *q = [[self query:account] mutableCopy];
+    q[(__bridge id)kSecValueData] = data;
+    // macOS login Keychain access follows its unlock state and item ACL.
+    // Do not set iOS-only data-protection accessibility attributes.
+    q[(__bridge id)kSecAttrSynchronizable] = @NO;
+    status = SecItemAdd((__bridge CFDictionaryRef)q, NULL);
+    entry.cachedValue = (status == errSecSuccess) ? [t copy] : NSNull.null;
+  }
 }
 @end
 
@@ -306,6 +334,7 @@ static BOOL GHReserveRetry(void) {
   static LBGitHub *g; static dispatch_once_t once;
   dispatch_once(&once, ^{ g = [LBGitHub new]; }); return g;
 }
++ (void)noteCredentialChange { GHCredentialGeneration++; }
 - (instancetype)initWithRepository:(NSString *)repository {
   if ((self = [super init])) {
     _frozenRepository = [repository copy]; _frozenToken = [[LBKeychain get:@"github-token"] copy] ?: @""; _credentialGeneration = GHCredentialGeneration;
@@ -885,7 +914,8 @@ static long long msFromDateString(NSString *s) {
 - (void)refreshAll:(void (^)(void))done {
   dispatch_group_t g = dispatch_group_create();
   for (NSString *part in @[ @"memos", @"deploy", @"posts", @"env" ]) {
-    if (([part isEqualToString:@"posts"] || [part isEqualToString:@"env"]) && !LBGitHub.shared.configured) continue;
+    if (LBSmokeTestMode() && ![part isEqualToString:@"posts"]) continue;
+    if ([part isEqualToString:@"env"] && !LBGitHub.shared.configured) continue;
     dispatch_group_enter(g);
     void (^leave)(void) = ^{ dispatch_group_leave(g); };
     if ([part isEqualToString:@"memos"]) [self refreshMemos:leave];

@@ -17,6 +17,8 @@ struct LongBlogApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("新建文章") { post("newArticle") }.keyboardShortcut("n")
                 Button("写说说") { post("newMemo") }.keyboardShortcut("n", modifiers: [.command, .shift])
+                Divider()
+                Button("命令面板 / 快速跳转…") { post("commandPalette") }.keyboardShortcut("p")
             }
             CommandGroup(after: .saveItem) {
                 Button("保存") { post("save") }.keyboardShortcut("s")
@@ -25,15 +27,26 @@ struct LongBlogApp: App {
             CommandGroup(after: .textEditing) {
                 Button("切换阅读 / 编辑") { post("editArticle") }.keyboardShortcut("e")
                 Button("搜索") { post("search") }.keyboardShortcut("f")
+                Button("专注写作模式") { post("toggleFocus") }.keyboardShortcut("f", modifiers: [.command, .shift])
             }
             CommandMenu("格式") {
                 ForEach(MarkdownAction.allCases) { action in
-                    let button = Button(action.title) { MarkdownEditorController.focused?.apply(action) }
+                    let button = Button(action.title) {
+                        guard !AppModel.activeTextInputHasMarkedText else { return }
+                        if let editor = MarkdownEditorController.focused {
+                            editor.apply(action)
+                        } else if action == .link {
+                            post("commandPalette")
+                        }
+                    }
                     if let s = action.shortcut { button.keyboardShortcut(s.key, modifiers: s.modifiers) } else { button }
                     if [.image, .heading3, .taskList, .rule].contains(action) { Divider() }
                 }
             }
             CommandGroup(before: .toolbar) {
+                Button("命令面板…") { post("commandPalette") }
+                Button("显示 / 隐藏侧边栏") { post("toggleSidebar") }.keyboardShortcut("\\", modifiers: .command)
+                Divider()
                 Button("仪表盘") { post("nav.dashboard") }.keyboardShortcut("1")
                 Button("留言") { post("nav.inbox") }.keyboardShortcut("2")
                 Button("文章") { post("nav.posts") }.keyboardShortcut("3")
@@ -62,41 +75,62 @@ struct LongBlogApp: App {
     }
 }
 
-final class LongBlogAppDelegate: NSObject, NSApplicationDelegate {
-    private var workspaceWindow: NSWindow?
+final class LongBlogAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private(set) var workspaceWindow: NSWindow?
+    private var suppressNextInboxFocusReload = false
+    @MainActor let menuBar = MenuBarController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSWindow.allowsAutomaticWindowTabbing = false
-        AppAppearance.apply()
+        let args = ProcessInfo.processInfo.arguments
+        if args.contains("--smoke-test") && args.contains("--smoke-light") {
+            NSApp.appearance = NSAppearance(named: .aqua)
+        } else if args.contains("--smoke-test") {
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+        } else {
+            AppAppearance.apply()
+        }
         _ = AppModel.shared // installs the single menu-command router
         showWorkspace()
-        let args = ProcessInfo.processInfo.arguments
+        menuBar.setupIfEnabled()
+
         if args.contains("--smoke-test"), let i = args.firstIndex(of: "--smoke-section"), args.indices.contains(i + 1) {
-            let sections: [String: WorkspaceSection] = ["dashboard": .dashboard, "inbox": .inbox, "posts": .posts, "memos": .memos, "configuration": .configuration]
+            let sections: [String: WorkspaceSection] = [
+                "dashboard": .dashboard, "inbox": .inbox, "posts": .posts,
+                "memos": .memos, "configuration": .configuration
+            ]
             if let section = sections[args[i + 1]] { AppModel.shared.navigate(section) }
         }
         // Smoke-only: open an unsaved draft filled from a local Markdown file to render the editor.
         if args.contains("--smoke-test"), let i = args.firstIndex(of: "--smoke-markdown"), args.indices.contains(i + 1),
            let text = try? String(contentsOfFile: args[i + 1], encoding: .utf8) {
             AppModel.shared.newArticle()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 let lines = text.components(separatedBy: "\n")
                 AppModel.shared.posts.draft.title = lines.first?.replacingOccurrences(of: "# ", with: "") ?? "示例"
                 AppModel.shared.posts.draft.markdown = lines.dropFirst().joined(separator: "\n")
+                AppModel.shared.posts.draft.tags = "控制理论, LaTeX, 非线性系统"
+                AppModel.shared.posts.draft.summary = "汇总非线性系统分析的核心公式：状态空间描述、雅可比矩阵线性化与 Lyapunov 稳定性判据。"
                 if args.contains("--smoke-read") { AppModel.shared.posts.editing = false }
+                if args.contains("--smoke-focus") { AppModel.shared.focusMode = true }
+            }
+        }
+        if args.contains("--smoke-test") && args.contains("--smoke-palette") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                AppModel.shared.showingCommandPalette = true
             }
         }
         NSApp.activate(ignoringOtherApps: true)
         if args.contains("--smoke-test") {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) {
                 self.captureSmokeWindow()
             }
         }
     }
 
     @MainActor
-    func showWorkspace() {
+    func showWorkspace(reloadInboxOnFocus: Bool = true) {
         if workspaceWindow == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -107,14 +141,40 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate {
             window.isReleasedWhenClosed = false
             window.isRestorable = false
             window.tabbingMode = .disallowed
-            window.minSize = NSSize(width: 1000, height: 640)
+            window.minSize = NSSize(width: 1020, height: 660)
             window.backgroundColor = .lbBackground
             window.contentView = NSHostingView(rootView: RootView())
             window.center()
-            window.setFrameAutosaveName("LongBlogWorkspace")
+            if !ProcessInfo.processInfo.arguments.contains("--smoke-test") {
+                window.setFrameAutosaveName("LongBlogWorkspace")
+            }
+            window.delegate = self
             workspaceWindow = window
         }
+        if !reloadInboxOnFocus { suppressNextInboxFocusReload = true }
         workspaceWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if workspaceWindow?.isKeyWindow == true { suppressNextInboxFocusReload = false }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        let app = AppModel.shared
+        if app.connectionLocked {
+            let alert = NSAlert(); alert.messageText = "操作尚未完成"; alert.informativeText = "请等待当前读取或写入结束，避免关闭时失去结果。"; alert.runModal(); return false
+        }
+        guard !app.dirtyNames.isEmpty else { return true }
+        let alert = NSAlert(); alert.messageText = "仍有未保存的修改"; alert.informativeText = app.dirtyNames.joined(separator: "、") + "尚未保存。关闭后可从主窗口继续编辑，退出应用前仍需保存。"; alert.addButton(withTitle: "继续编辑"); alert.addButton(withTitle: "保留并关闭")
+        return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        let reload = !suppressNextInboxFocusReload
+        suppressNextInboxFocusReload = false
+        AppModel.shared.inbox.workspaceFocusChanged(true, reload: reload)
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        AppModel.shared.inbox.workspaceFocusChanged(false)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

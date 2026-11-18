@@ -4,15 +4,60 @@ import Combine
 
 struct DataRow: Identifiable {
     let data: [String: Any]
-    var id: String { if let id = data["id"] as? String { return id }; return (data["id"] as? NSNumber)?.stringValue ?? UUID().uuidString }
+    var id: String {
+        if let id = data["id"] as? String { return id }
+        return (data["id"] as? NSNumber)?.stringValue ?? UUID().uuidString
+    }
     func text(_ key: String) -> String { data[key] as? String ?? "" }
     func flag(_ key: String) -> Bool { (data[key] as? NSNumber)?.boolValue ?? false }
     func number(_ key: String) -> Double { (data[key] as? NSNumber)?.doubleValue ?? 0 }
 }
+
 func rows(_ value: Any?) -> [DataRow] { (value as? [[String: Any]] ?? []).map { DataRow(data: $0) } }
+
 func dateLabel(_ value: Double, milliseconds: Bool = true) -> String {
     guard value > 0 else { return "—" }
     return Date(timeIntervalSince1970: value / (milliseconds ? 1000 : 1)).formatted(date: .abbreviated, time: .shortened)
+}
+
+func shortDateTimeLabel(_ value: Double, milliseconds: Bool = true) -> String {
+    guard value > 0 else { return "—" }
+    let date = Date(timeIntervalSince1970: value / (milliseconds ? 1000 : 1))
+    let cal = Calendar.current
+    if cal.isDateInToday(date) {
+        return "今天 " + date.formatted(date: .omitted, time: .shortened)
+    } else if cal.isDateInYesterday(date) {
+        return "昨天 " + date.formatted(date: .omitted, time: .shortened)
+    }
+    let sameYear = cal.component(.year, from: date) == cal.component(.year, from: Date())
+    if sameYear {
+        return date.formatted(.dateTime.month(.defaultDigits).day(.defaultDigits).hour(.twoDigits(amPM: .omitted)).minute(.twoDigits))
+    }
+    return date.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits))
+}
+
+func relativeTimeLabel(_ value: Double, milliseconds: Bool = true) -> String {
+    guard value > 0 else { return "—" }
+    let seconds = value / (milliseconds ? 1000 : 1)
+    let delta = Date().timeIntervalSince1970 - seconds
+    if delta < 45 { return "刚刚" }
+    if delta < 3600 { return "\(max(1, Int(delta / 60))) 分钟前" }
+    if delta < 86400, Calendar.current.isDateInToday(Date(timeIntervalSince1970: seconds)) {
+        return "\(max(1, Int(delta / 3600))) 小时前"
+    }
+    if Calendar.current.isDateInYesterday(Date(timeIntervalSince1970: seconds)) { return "昨天" }
+    return shortDateTimeLabel(value, milliseconds: milliseconds)
+}
+
+func formattedISOBuildTime(_ raw: String?) -> String {
+    guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return "—" }
+    let isoFrac = ISO8601DateFormatter()
+    isoFrac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let isoPlain = ISO8601DateFormatter()
+    if let date = isoFrac.date(from: raw) ?? isoPlain.date(from: raw) {
+        return shortDateTimeLabel(date.timeIntervalSince1970, milliseconds: false)
+    }
+    return raw
 }
 
 @MainActor class ServiceModel: ObservableObject {
@@ -56,7 +101,8 @@ func dateLabel(_ value: Double, milliseconds: Bool = true) -> String {
         ["list": "读取列表", "load": "读取", "save": "保存", "new": "新建", "stage": "暂存", "sync": "同步", "commit": "提交",
          "revert": "撤销", "attachment": "导入附件", "dashboard": "读取状态", "sessions": "读取会话", "messages": "读取消息",
          "read": "标记已读", "contact": "联系信息", "reply": "发送回复", "identity": "验证账户", "update": "更新",
-         "upload": "上传附件", "download": "下载附件", "preview": "生成预览", "folder": "绑定目录"][key] ?? key
+         "upload": "上传附件", "download": "下载附件", "preview": "生成预览", "folder": "绑定目录",
+         "settings": "读取连接"][key] ?? key
     }
 }
 
@@ -68,19 +114,39 @@ struct PendingConfirmation: Identifiable {
     let destructive: Bool
     let action: () -> Void
 }
+
 enum WorkspaceSection: String, CaseIterable, Identifiable {
     case dashboard = "仪表盘", inbox = "留言", posts = "文章", memos = "说说", configuration = "站点配置"
     var id: String { rawValue }
     var symbol: String {
-        switch self { case .dashboard: return "square.grid.2x2"; case .inbox: return "bubble.left.and.bubble.right"; case .posts: return "doc.text"; case .memos: return "quote.bubble"; case .configuration: return "slider.horizontal.3" }
+        switch self {
+        case .dashboard: return "gauge.with.dots.needle.bottom.50percent"
+        case .inbox: return "bubble.left"
+        case .posts: return "doc.text"
+        case .memos: return "text.bubble"
+        case .configuration: return "slider.horizontal.3"
+        }
+    }
+    var commandAlias: String {
+        switch self {
+        case .dashboard: return "dashboard"
+        case .inbox: return "inbox"
+        case .posts: return "posts"
+        case .memos: return "memos"
+        case .configuration: return "config"
+        }
     }
 }
+
 @MainActor final class AppModel: ObservableObject {
     static let shared = AppModel()
     @Published var section: WorkspaceSection = .dashboard
     @Published var confirmation: PendingConfirmation?
     @Published var showingSettings = false
     @Published var showingReview = false
+    @Published var showingCommandPalette = false
+    @Published var focusMode = false
+    @Published var sidebarCollapsed = false
     @Published var searchRequested = UUID()
     let dashboard = DashboardModel()
     let posts = PostsModel()
@@ -88,9 +154,13 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     let memos = MemosModel()
     let configuration = ConfigurationModel()
     private var commandObservers: [NSObjectProtocol] = []
+    private weak var paletteSavedWindow: NSWindow?
+    private weak var paletteSavedResponder: NSResponder?
+    private var paletteSavedFieldSelection: NSRange?
     static let commandNames = ["newArticle", "newMemo", "save", "review", "refresh", "search", "editArticle",
                                "nav.dashboard", "nav.inbox", "nav.posts", "nav.memos", "nav.configuration", "settings",
-                               "layout.read", "layout.edit", "layout.split"]
+                               "layout.read", "layout.edit", "layout.split", "commandPalette", "toggleFocus", "toggleSidebar"]
+
     /// Menu commands are routed ONCE here (not per view), so a second window or a
     /// re-created RootView can never execute ⌘N / ⌘S twice.
     private init() {
@@ -99,15 +169,36 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
                 MainActor.assumeIsolated { AppModel.shared.route(name) }
             }
         }
+        commandObservers.append(
+            NotificationCenter.default.addObserver(forName: Notification.Name("LBSyncDidChange"), object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated { AppModel.shared.inbox.syncFromCore() }
+            }
+        )
+        commandObservers.append(
+            NotificationCenter.default.addObserver(forName: Notification.Name("LBOpenSessionRequest"), object: nil, queue: .main) { note in
+                let sid = note.userInfo?["sessionId"] as? String
+                MainActor.assumeIsolated {
+                    (NSApp.delegate as? LongBlogAppDelegate)?.showWorkspace(reloadInboxOnFocus: false)
+                    AppModel.shared.openInboxSession(sid)
+                }
+            }
+        )
     }
-    var connectionLocked: Bool { posts.busy || inbox.busy || memos.busy || configuration.busy || dashboard.busy || showingReview || confirmation != nil }
+
+    var connectionLocked: Bool {
+        posts.busy || inbox.busy || memos.busy || configuration.busy || dashboard.busy || showingReview || confirmation != nil
+    }
+
     func resetConnectionViews() {
         posts.resetBuffer(); posts.articles = []; posts.staged = []; posts.loaded = false; posts.clearMessages()
-        inbox.sessions = []; inbox.messages = []; inbox.selected = nil; inbox.contact = nil; inbox.reply = ""; inbox.failedReply = nil; inbox.loaded = false; inbox.unread = 0; inbox.clearMessages()
+        inbox.setActiveSession(nil)
+        inbox.pendingSelectID = nil
+        inbox.sessions = []; inbox.messages = []; inbox.selected = nil; inbox.contact = nil; inbox.reply = ""; inbox.failedReply = nil; inbox.loaded = false; inbox.unread = 0; inbox.lastSync = nil; inbox.clearMessages()
         memos.assign(nil); memos.items = []; memos.editing = false; memos.loaded = false; memos.username = ""; memos.clearMessages()
-        configuration.baseline = ""; configuration.sha = ""; configuration.values = [:]; configuration.baselineValues = [:]; configuration.sections = []; configuration.clearMessages()
+        configuration.baseline = ""; configuration.sha = ""; configuration.values = [:]; configuration.baselineValues = [:]; configuration.sections = []; configuration.search = ""; configuration.clearMessages()
         dashboard.data = [:]; dashboard.refreshed = nil; dashboard.clearMessages()
     }
+
     /// Parent AppDelegate may use this for applicationShouldTerminate(.terminateLater).
     func confirmDiscardBeforeClose(_ completion: @escaping (Bool) -> Void) {
         if connectionLocked {
@@ -118,12 +209,16 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         alert.addButton(withTitle: "继续编辑"); alert.addButton(withTitle: "放弃并退出")
         AlertHost.present(alert) { completion($0 == .alertSecondButtonReturn) }
     }
+
     var dirtyNames: [String] {
         var result: [String] = []
-        if posts.isDirty { result.append("文章") }; if memos.isDirty { result.append("说说") }
-        if configuration.isDirty { result.append("站点配置") }; if !inbox.reply.isEmpty { result.append("回复") }
+        if posts.isDirty { result.append("文章") }
+        if memos.isDirty { result.append("说说") }
+        if configuration.isDirty { result.append("站点配置") }
+        if !inbox.reply.isEmpty { result.append("回复") }
         return result
     }
+
     func confirm(_ title: String, _ detail: String, button: String = "确认", destructive: Bool = false, action: @escaping () -> Void) {
         guard confirmation == nil else { return }
         confirmation = PendingConfirmation(title: title, detail: detail, button: button, destructive: destructive, action: action)
@@ -136,17 +231,72 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         }
         AlertHost.present(alert, completion: finish)
     }
-    func navigate(_ target: WorkspaceSection) { section = target; refreshIfNeeded() }
+
+    func navigate(_ target: WorkspaceSection, reloadingSelectedInbox: Bool = true) {
+        if section != target {
+            if section == .inbox { inbox.setActiveSession(nil) }
+            withAnimation(.easeOut(duration: 0.16)) {
+                section = target
+                if target != .posts && focusMode { focusMode = false }
+            }
+            if target == .inbox, reloadingSelectedInbox, let selected = inbox.selected, !inbox.archived {
+                inbox.setActiveSession(selected.id)
+                inbox.loadMessages()
+            }
+        }
+        refreshIfNeeded()
+    }
+
+    func openInboxSession(_ sessionID: String?) {
+        if showingCommandPalette { showingCommandPalette = false }
+        guard let sessionID = sessionID, !sessionID.isEmpty else {
+            navigate(.inbox)
+            return
+        }
+        if !inbox.loaded {
+            inbox.pendingSelectID = sessionID
+            navigate(.inbox, reloadingSelectedInbox: false)
+            return
+        }
+        if !inbox.archived, inbox.selected?.id == sessionID {
+            navigate(.inbox, reloadingSelectedInbox: true)
+            inbox.whenIdle {
+                guard self.section == .inbox, !self.inbox.archived, self.inbox.selected?.id == sessionID else { return }
+                self.inbox.setActiveSession(sessionID)
+                self.inbox.loadMessages()
+            }
+            return
+        }
+        navigate(.inbox, reloadingSelectedInbox: false)
+        inbox.whenIdle {
+            guard self.section == .inbox else { return }
+            if self.inbox.archived {
+                self.inbox.setArchived(false, selecting: sessionID)
+            } else if let hit = self.inbox.sessions.first(where: { $0.id == sessionID }) {
+                self.inbox.select(hit)
+            } else {
+                self.inbox.pendingSelectID = sessionID
+                self.inbox.refresh()
+            }
+        }
+    }
+
     // Editors are retained across section switches. Selection changes are separately confirmed.
     func refreshIfNeeded() {
+        // Also pre-load local posts count silently once so sidebar badge & ⌘K search work immediately.
+        if !posts.loaded && !posts.busy { posts.refresh(autoSelectFirst: section == .posts) }
         switch section {
         case .dashboard: if dashboard.data.isEmpty { dashboard.refresh() }
-        case .posts: if !posts.loaded { posts.refresh() }
+        case .posts:
+            if posts.loaded, posts.draft.id.isEmpty, !posts.editing, let first = posts.filtered.first {
+                posts.select(first)
+            }
         case .inbox: if !inbox.loaded { inbox.refresh() }
         case .memos: if !memos.loaded { memos.refresh() }
         case .configuration: if configuration.baseline.isEmpty { configuration.refresh() }
         }
     }
+
     func newArticle() { navigate(.posts); posts.newArticle() }
     func newMemo() { navigate(.memos); memos.newMemo() }
     func save() {
@@ -154,12 +304,83 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     }
     func review() { navigate(.posts); posts.review() }
     func refresh() {
-        switch section { case .dashboard: dashboard.refresh(); case .posts: posts.refresh(); case .inbox: inbox.refresh(); case .memos: memos.refresh(); case .configuration: configuration.refresh() }
+        switch section {
+        case .dashboard: dashboard.refresh()
+        case .posts: posts.refresh(autoSelectFirst: posts.draft.id.isEmpty)
+        case .inbox: inbox.refresh()
+        case .memos: memos.refresh()
+        case .configuration: configuration.refresh()
+        }
     }
     func editArticle() {
         navigate(.posts)
         guard !posts.draft.id.isEmpty else { return }
-        posts.editing.toggle()
+        withAnimation(.easeOut(duration: 0.16)) {
+            posts.editing.toggle()
+            if !posts.editing && focusMode { focusMode = false }
+        }
+    }
+    func toggleFocusMode() {
+        if section != .posts { navigate(.posts) }
+        guard !posts.draft.id.isEmpty else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+            if !focusMode {
+                posts.editing = true
+                focusMode = true
+            } else {
+                focusMode = false
+            }
+        }
+    }
+    func openCommandPalette() {
+        guard !showingCommandPalette, !Self.activeTextInputHasMarkedText else { return }
+        var win = NSApp.keyWindow ?? NSApp.mainWindow ?? (NSApp.delegate as? LongBlogAppDelegate)?.workspaceWindow
+        while let sheet = win?.attachedSheet { win = sheet }
+        paletteSavedWindow = win
+        if let tv = win?.firstResponder as? NSTextView, tv.isFieldEditor {
+            paletteSavedResponder = tv.delegate as? NSResponder
+            paletteSavedFieldSelection = tv.selectedRange()
+        } else {
+            paletteSavedResponder = win?.firstResponder
+            paletteSavedFieldSelection = nil
+        }
+        withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
+            showingCommandPalette = true
+        }
+    }
+
+    func closeCommandPalette(restoreFocus: Bool) {
+        guard showingCommandPalette else { return }
+        let win = paletteSavedWindow
+        let responder = paletteSavedResponder
+        let savedRange = paletteSavedFieldSelection
+        paletteSavedWindow = nil
+        paletteSavedResponder = nil
+        paletteSavedFieldSelection = nil
+        withAnimation(.easeOut(duration: 0.14)) {
+            showingCommandPalette = false
+        }
+        guard restoreFocus, let win = win, let responder = responder, responder !== win else { return }
+        @MainActor func applyRestore() {
+            guard win.attachedSheet == nil, self.confirmation == nil, !self.showingCommandPalette else { return }
+            _ = win.makeFirstResponder(responder)
+            if let range = savedRange, let tv = win.firstResponder as? NSTextView, tv.isFieldEditor {
+                let len = (tv.string as NSString).length
+                let loc = min(range.location, len)
+                tv.setSelectedRange(NSRange(location: loc, length: min(range.length, len - loc)))
+            }
+        }
+        applyRestore()
+        DispatchQueue.main.async { applyRestore() }
+    }
+
+    func toggleCommandPalette() {
+        // Inside Markdown editor, ⌘K inserts a link; MarkdownTextView intercepts ⌘K directly when focused.
+        if showingCommandPalette {
+            closeCommandPalette(restoreFocus: true)
+        } else {
+            openCommandPalette()
+        }
     }
     func search() {
         // Inside the Markdown editor ⌘F opens the in-document find bar instead.
@@ -167,16 +388,41 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
             let item = NSMenuItem(); item.tag = Int(NSTextFinder.Action.showFindInterface.rawValue)
             editor.performTextFinderAction(item); return
         }
+        if section == .dashboard {
+            openCommandPalette()
+            return
+        }
         searchRequested = UUID()
     }
+    static var activeTextInputHasMarkedText: Bool {
+        var window = NSApp.keyWindow ?? NSApp.mainWindow ?? (NSApp.delegate as? LongBlogAppDelegate)?.workspaceWindow
+        while let sheet = window?.attachedSheet { window = sheet }
+        return (window?.firstResponder as? NSTextInputClient)?.hasMarkedText() == true
+    }
+
     func route(_ name: String) {
+        guard !Self.activeTextInputHasMarkedText,
+              confirmation == nil, NSApp.modalWindow == nil, NSApp.keyWindow?.sheetParent == nil,
+              NSApp.mainWindow?.attachedSheet == nil else { return }
+        if showingCommandPalette && name != "commandPalette" { return }
         switch name {
-        case "newArticle": newArticle(); case "newMemo": newMemo(); case "save": save(); case "review": review()
-        case "refresh": refresh(); case "search": search(); case "editArticle": editArticle()
+        case "newArticle": newArticle()
+        case "newMemo": newMemo()
+        case "save": save()
+        case "review": review()
+        case "refresh": refresh()
+        case "search": search()
+        case "editArticle": editArticle()
         case "settings": showingSettings = true
-        case "nav.dashboard": navigate(.dashboard); case "nav.inbox": navigate(.inbox); case "nav.posts": navigate(.posts)
-        case "nav.memos": navigate(.memos); case "nav.configuration": navigate(.configuration)
-        case "layout.read": if section == .posts, !posts.draft.id.isEmpty { posts.editing = false }
+        case "commandPalette": toggleCommandPalette()
+        case "toggleFocus": toggleFocusMode()
+        case "toggleSidebar": withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) { sidebarCollapsed.toggle() }
+        case "nav.dashboard": navigate(.dashboard)
+        case "nav.inbox": navigate(.inbox)
+        case "nav.posts": navigate(.posts)
+        case "nav.memos": navigate(.memos)
+        case "nav.configuration": navigate(.configuration)
+        case "layout.read": if section == .posts, !posts.draft.id.isEmpty { posts.editing = false; focusMode = false }
         case "layout.edit": if section == .posts, !posts.draft.id.isEmpty { posts.editing = true; posts.splitPreview = false }
         case "layout.split": if section == .posts, !posts.draft.id.isEmpty { posts.editing = true; posts.splitPreview = true }
         default: break
@@ -187,22 +433,51 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
 @MainActor final class DashboardModel: ServiceModel {
     @Published var data: [String: Any] = [:]
     @Published var refreshed: Date?
-    func refresh() { run("dashboard", "site.refresh") { self.data = $0; self.refreshed = Date() } }
+    func refresh() {
+        run("dashboard", "site.refresh") {
+            self.data = $0
+            self.refreshed = Date()
+            if ($0["inboxConfigured"] as? NSNumber)?.boolValue == true {
+                LBUIRequest("inbox.polling", ["active": true]) { _, _ in }
+            }
+        }
+    }
 }
 
 struct PostDraft: Equatable {
     var id = "", title = "", markdown = "", summary = "", tags = "", published = false, bodyFormat = "markdown"
+    var createdAt: Double = 0, updatedAt: Double = 0, publishedAt: Double = 0
     var directory: URL?
     init() {}
     init(_ row: [String: Any]) {
-        id = row["id"] as? String ?? ""; title = row["title"] as? String ?? ""
-        markdown = row["markdown"] as? String ?? ""; summary = row["manualSummary"] as? String ?? row["summary"] as? String ?? ""
+        id = row["id"] as? String ?? ""
+        title = row["title"] as? String ?? ""
+        markdown = row["markdown"] as? String ?? ""
+        summary = row["manualSummary"] as? String ?? row["summary"] as? String ?? ""
         tags = (row["tags"] as? [String] ?? []).joined(separator: ", ")
         published = (row["publish"] as? NSNumber)?.boolValue ?? false
-        directory = row["directory"] as? URL; bodyFormat = row["bodyFormat"] as? String ?? "markdown"
+        createdAt = (row["createdAt"] as? NSNumber)?.doubleValue ?? 0
+        updatedAt = (row["updatedAt"] as? NSNumber)?.doubleValue ?? 0
+        publishedAt = (row["publishedAt"] as? NSNumber)?.doubleValue ?? 0
+        directory = row["directory"] as? URL
+        bodyFormat = row["bodyFormat"] as? String ?? "markdown"
     }
-    var arguments: [String: Any] { ["id":id, "title":title, "markdown":markdown, "summary":summary, "publish":published, "tags":tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }] }
+    static func == (lhs: PostDraft, rhs: PostDraft) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.title == rhs.title &&
+        lhs.markdown == rhs.markdown &&
+        lhs.summary == rhs.summary &&
+        lhs.tags == rhs.tags &&
+        lhs.published == rhs.published &&
+        lhs.bodyFormat == rhs.bodyFormat &&
+        lhs.directory == rhs.directory
+    }
+    var arguments: [String: Any] {
+        ["id": id, "title": title, "markdown": markdown, "summary": summary, "publish": published,
+         "tags": tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }]
+    }
 }
+
 @MainActor final class PostsModel: ServiceModel {
     @Published var articles: [DataRow] = []
     @Published var staged: [[String: Any]] = []
@@ -220,42 +495,89 @@ struct PostDraft: Equatable {
     private var saved = PostDraft()
     var isDirty: Bool { draft != saved }
     var stagedIDs: Set<String> { Set(staged.compactMap { $0["id"] as? String }) }
-    var filtered: [DataRow] { articles.filter { (filter == "全部" || ($0.flag("publish") ? filter == "已发布" : filter == "草稿")) && (search.isEmpty || $0.text("title").localizedCaseInsensitiveContains(search) || $0.text("summary").localizedCaseInsensitiveContains(search)) } }
+    var draftCount: Int { articles.filter { !$0.flag("publish") }.count }
+    var publishedCount: Int { articles.filter { $0.flag("publish") }.count }
+    var filtered: [DataRow] {
+        articles.filter {
+            let matchesFilter = filter == "全部" || ($0.flag("publish") ? filter == "已发布" : filter == "草稿")
+            guard matchesFilter else { return false }
+            guard !search.isEmpty else { return true }
+            let tags = ($0.data["tags"] as? [String] ?? []).joined(separator: " ")
+            return $0.text("title").localizedCaseInsensitiveContains(search)
+                || $0.text("summary").localizedCaseInsensitiveContains(search)
+                || tags.localizedCaseInsensitiveContains(search)
+        }
+    }
     func resetBuffer() { draft = PostDraft(); saved = draft; editing = false; frozenReview = [] }
     func reloadCurrent() {
         guard !draft.id.isEmpty, !isDirty else { return }
         let id = draft.id
-        run("load", "posts.load", ["id":id]) { self.draft = PostDraft($0); self.saved = self.draft }
+        run("load", "posts.load", ["id": id]) { self.draft = PostDraft($0); self.saved = self.draft }
     }
-    func refresh() { run("list", "posts.list") { self.articles = rows($0["rows"]); self.staged = $0["staged"] as? [[String: Any]] ?? []; self.folder = $0["folder"] as? String ?? "Posts"; self.loaded = true } }
+    func refresh(autoSelectFirst: Bool = false) {
+        run("list", "posts.list") {
+            self.articles = rows($0["rows"])
+            self.staged = $0["staged"] as? [[String: Any]] ?? []
+            self.folder = $0["folder"] as? String ?? "Posts"
+            self.loaded = true
+            if autoSelectFirst, self.draft.id.isEmpty, !self.editing, let first = self.filtered.first {
+                self.select(first)
+            }
+        }
+    }
     func discardThen(_ action: @escaping () -> Void) {
         guard !busy else { whenIdle { self.discardThen(action) }; return }
         if isDirty { AppModel.shared.confirm("放弃未保存的文章修改？", "当前编辑缓冲区将被替换。本地已保存文件不受影响。", button: "放弃修改", destructive: true, action: action) } else { action() }
     }
-    func select(_ row: DataRow) {
+    func select(_ row: DataRow, keepStudioMode: Bool? = nil) {
         guard row.id != draft.id else { return }
-        discardThen { self.run("load", "posts.load", ["id":row.id]) { self.draft = PostDraft($0); self.saved = self.draft; self.editing = false } }
+        let stayEditing = keepStudioMode ?? (editing && splitPreview)
+        discardThen {
+            self.run("load", "posts.load", ["id": row.id]) {
+                self.draft = PostDraft($0)
+                self.saved = self.draft
+                self.editing = stayEditing
+            }
+        }
     }
-    func newArticle() { discardThen { self.run("new", "posts.new") { self.draft = PostDraft($0); self.saved = self.draft; self.editing = true } } }
+    func newArticle() {
+        discardThen {
+            self.run("new", "posts.new") {
+                self.draft = PostDraft($0)
+                self.saved = self.draft
+                self.editing = true
+            }
+        }
+    }
     func save(after: (() -> Void)? = nil) {
         guard !busy, !draft.id.isEmpty else { return }
         guard isDirty else { successes["save"] = "文章没有变化，未重写文件或 updatedAt。"; after?(); return }
         guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { errors["save"] = "请填写文章标题。"; return }
         let frozen = draft
         run("save", "posts.save", frozen.arguments, success: "文章已保存到本地；线上内容尚未改变。") { result in
-            self.draft = PostDraft(result); self.saved = self.draft; self.refresh(); after?()
+            self.draft = PostDraft(result); self.saved = self.draft
+            after?()
+            self.refresh()
         }
     }
     func stage(_ publish: Bool) {
         guard !draft.id.isEmpty, !busy else { return }
         let id = draft.id
-        let apply = { self.run("stage", "posts.stage", ["id":id, "publish":publish], success: publish ? "已暂存发布；请审阅后批量提交。" : "已暂存下架；线上尚未改变。") { _ in self.refresh(); self.reloadCurrent() } }
+        let apply = {
+            self.run("stage", "posts.stage", ["id": id, "publish": publish],
+                     success: publish ? "已暂存发布；请审阅后批量提交。" : "已暂存下架；线上尚未改变。") { _ in
+                self.refresh(); self.reloadCurrent()
+            }
+        }
         if isDirty { save(after: apply) } else { apply() }
     }
     func sync() {
         guard !busy else { return }
         AppModel.shared.confirm("同步 GitHub 文章？", "下载 main 的文章和附件。Core 会保留本地草稿、修改和待确认事务；不会自动提交。", button: "同步") {
-            self.run("sync", "posts.sync", success: "GitHub 同步完成；本地修改已保留。") { _ in self.refresh(); self.reloadCurrent() }
+            self.run("sync", "posts.sync", success: "GitHub 同步完成；本地修改已保留。") { _ in
+                self.refresh(autoSelectFirst: self.draft.id.isEmpty)
+                self.reloadCurrent()
+            }
         }
     }
     func review() {
@@ -267,16 +589,21 @@ struct PostDraft: Equatable {
         let frozen = frozenReview, message = commitMessage
         guard !frozen.isEmpty, !busy else { return }
         AppModel.shared.confirm("将 \(frozen.count) 项变更提交到 main？", "创建一个原子提交，并以非强制方式更新分支。失败或结果未知时不自动重试；Core 的 pending 保护保持生效。", button: "提交到 main") {
-            self.run("commit", "posts.commit", ["rows":frozen, "message":message], success: "文章批次已提交。部署仍需等待流水线。") { _ in AppModel.shared.showingReview = false; self.refresh(); self.reloadCurrent() }
+            self.run("commit", "posts.commit", ["rows": frozen, "message": message], success: "文章批次已提交。部署仍需等待流水线。") { _ in
+                AppModel.shared.showingReview = false; self.refresh(); self.reloadCurrent()
+            }
         }
     }
     func revert() {
         let frozen = frozenReview.isEmpty ? staged : frozenReview
         guard !frozen.isEmpty, !busy else { return }
         AppModel.shared.confirm("撤销这 \(frozen.count) 项暂存？", "Core 将验证冻结的 revertGuard 与远端基准。已跟踪的本地改动可能被还原；从未发布的草稿和未跟踪附件保留。不会创建远端提交。", button: "撤销暂存", destructive: true) {
-            self.run("revert", "posts.revert", ["rows":frozen], success: "冻结选择的暂存变更已撤销。") { _ in
+            self.run("revert", "posts.revert", ["rows": frozen], success: "冻结选择的暂存变更已撤销。") { _ in
                 AppModel.shared.showingReview = false; self.refresh()
-                if !self.draft.id.isEmpty { let id = self.draft.id; self.run("load", "posts.load", ["id":id]) { self.draft = PostDraft($0); self.saved = self.draft } }
+                if !self.draft.id.isEmpty {
+                    let id = self.draft.id
+                    self.run("load", "posts.load", ["id": id]) { self.draft = PostDraft($0); self.saved = self.draft }
+                }
             }
         }
     }
@@ -285,18 +612,21 @@ struct PostDraft: Equatable {
     func importFiles(_ urls: [URL], insert: ((String) -> Void)? = nil) {
         guard !busy, !draft.id.isEmpty, !urls.isEmpty else { return }
         if isDirty {
-            guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { errors["attachment"] = "请先填写文章标题，保存后才能导入附件。"; return }
+            guard !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                errors["attachment"] = "请先填写文章标题，保存后才能导入附件。"
+                return
+            }
             save { self.importFiles(urls, insert: insert) }
             return
         }
         var remaining = urls
         let first = remaining.removeFirst()
         let id = draft.id
-        run("attachment", "posts.import", ["id":id, "url":first], success: "附件已复制到文章资源目录；保存后随文章一起审阅提交。") { result in
+        run("attachment", "posts.import", ["id": id, "url": first], success: "附件已复制到文章资源目录；保存后随文章一起审阅提交。") { result in
             guard self.draft.id == id, let path = result["path"] as? String else { return }
             let name = (result["filename"] as? String ?? "附件").replacingOccurrences(of: "]", with: "\\]")
             let encoded = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-            let image = ["png", "jpg", "jpeg", "gif", "webp", "heic", "svg"].contains(first.pathExtension.lowercased())
+            let image = ["png", "jpg", "jpeg", "gif", "webp"].contains(first.pathExtension.lowercased())
             let snippet = "\(image ? "!" : "")[\(name)](\(encoded))\n"
             if let insert = insert { insert(snippet) } else { self.draft.markdown += "\n" + snippet }
             self.draft.directory = result["directory"] as? URL
@@ -314,53 +644,143 @@ struct PostDraft: Equatable {
     @Published var reply = ""
     @Published var search = ""
     @Published var unread = 0
+    @Published var lastSync: Date?
     @Published var contact: [String: Any]?
     @Published var archiveCursor = ""
     @Published var messageCursor = 0
     @Published var failedReply: (id: String, text: String)?
+    var pendingSelectID: String?
     private var selectionRevision = UUID()
-    var filtered: [DataRow] { sessions.filter { search.isEmpty || $0.text("title").localizedCaseInsensitiveContains(search) || (($0.data["last"] as? [String: Any])?["text"] as? String ?? "").localizedCaseInsensitiveContains(search) } }
-    func refresh(more: Bool = false) {
-        var args: [String: Any] = [:]; if more && !archiveCursor.isEmpty { args["cursor"] = archiveCursor }
-        run("sessions", archived ? "inbox.archives" : "inbox.list", args) { result in
-            self.sessions = more ? self.sessions + rows(result["rows"]) : rows(result["rows"])
-            self.archiveCursor = result["cursor"] as? String ?? ""; self.unread = (result["unread"] as? NSNumber)?.intValue ?? 0; self.loaded = true
+
+    var filtered: [DataRow] {
+        sessions.filter {
+            search.isEmpty ||
+            $0.text("title").localizedCaseInsensitiveContains(search) ||
+            $0.id.localizedCaseInsensitiveContains(search) ||
+            (($0.data["last"] as? [String: Any])?["text"] as? String ?? "").localizedCaseInsensitiveContains(search)
         }
     }
-    func setArchived(_ value: Bool) {
+
+    private var workspaceHasFocus = false
+    private var visibleConversation: Bool {
+        workspaceHasFocus && AppModel.shared.section == .inbox && !archived
+    }
+
+    func workspaceFocusChanged(_ focused: Bool, reload: Bool = true) {
+        workspaceHasFocus = focused
+        guard AppModel.shared.confirmation == nil, pendingSelectID == nil else {
+            if !focused { setActiveSession(nil) }
+            return
+        }
+        setActiveSession(selected?.id)
+        if reload, visibleConversation, selected != nil { loadMessages() }
+    }
+
+    func setActiveSession(_ id: String?) {
+        LBUIRequest("inbox.active", ["id": visibleConversation ? id ?? "" : ""]) { _, _ in }
+    }
+
+    func syncFromCore() {
+        LBUIRequest("inbox.syncState", [:]) { [weak self] result, _ in
+            guard let self = self, let result = result else { return }
+            self.unread = (result["unread"] as? NSNumber)?.intValue ?? 0
+            if let syncDate = result["lastSync"] as? Date { self.lastSync = syncDate }
+            if !self.archived, let rawRows = result["rows"] {
+                let updated = rows(rawRows)
+                if !updated.isEmpty || self.loaded {
+                    self.sessions = updated
+                    if let selected = self.selected, let refreshed = updated.first(where: { $0.id == selected.id }) {
+                        self.selected = refreshed
+                        if self.visibleConversation, refreshed.number("lastUserSequence") > selected.number("lastUserSequence") {
+                            self.loadMessages()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func refresh(more: Bool = false) {
+        var args: [String: Any] = [:]
+        if more && !archiveCursor.isEmpty { args["cursor"] = archiveCursor }
+        run("sessions", archived ? "inbox.archives" : "inbox.list", args) { result in
+            self.sessions = more ? self.sessions + rows(result["rows"]) : rows(result["rows"])
+            self.archiveCursor = result["cursor"] as? String ?? ""
+            if !self.archived {
+                self.unread = (result["unread"] as? NSNumber)?.intValue ?? 0
+                if let syncDate = result["lastSync"] as? Date { self.lastSync = syncDate }
+                LBUIRequest("inbox.polling", ["active": true]) { _, _ in }
+            }
+            self.loaded = true
+            if let wanted = self.pendingSelectID {
+                self.pendingSelectID = nil
+                if let hit = self.sessions.first(where: { $0.id == wanted }) { self.select(hit) }
+                else { self.errors["sessions"] = "该会话已不在当前列表中。" }
+            } else if self.selected == nil, let first = self.sessions.first {
+                self.select(first)
+            }
+        }
+    }
+
+    func setArchived(_ value: Bool, selecting sessionID: String? = nil) {
         guard value != archived, !busy else { return }
-        let action = { self.archived = value; self.selected = nil; self.messages = []; self.reply = ""; self.failedReply = nil; self.contact = nil; self.selectionRevision = UUID(); self.sessions = []; self.refresh() }
+        let action = {
+            self.pendingSelectID = sessionID
+            self.setActiveSession(nil)
+            self.archived = value; self.selected = nil; self.messages = []; self.reply = ""
+            self.failedReply = nil; self.contact = nil; self.selectionRevision = UUID()
+            self.sessions = []; self.refresh()
+        }
         if !reply.isEmpty { AppModel.shared.confirm("放弃未发送的回复？", "切换会话列表会清除回复输入。", button: "放弃回复", destructive: true, action: action) } else { action() }
     }
+
     func select(_ row: DataRow) {
         guard !busy, selected?.id != row.id else { return }
-        let action = { self.selected = row; self.messages = []; self.reply = ""; self.failedReply = nil; self.contact = nil; self.messageCursor = 0; self.selectionRevision = UUID(); self.loadMessages() }
+        let action = {
+            self.selected = row; self.messages = []; self.reply = ""
+            self.failedReply = nil; self.contact = nil; self.messageCursor = 0
+            self.selectionRevision = UUID()
+            if AppModel.shared.section == .inbox && !self.archived { self.setActiveSession(row.id) }
+            self.loadMessages()
+        }
         if !reply.isEmpty { AppModel.shared.confirm("放弃未发送的回复？", "回复内容不会发送或保存。", button: "放弃回复", destructive: true, action: action) } else { action() }
     }
+
     func loadMessages() {
-        guard let selected = selected else { return }; let revision = selectionRevision
-        run("messages", "inbox.messages", ["id":selected.id, "archived":archived, "cursor":messageCursor]) { result in
+        guard let selected = selected else { return }
+        let revision = selectionRevision
+        run("messages", "inbox.messages", ["id": selected.id, "archived": archived, "cursor": messageCursor]) { result in
             guard self.selectionRevision == revision else { return }
-            let incoming = rows(result["rows"]); let existing = Set(self.messages.map(\.id))
+            let incoming = rows(result["rows"])
+            let existing = Set(self.messages.map(\.id))
             self.messages += incoming.filter { !existing.contains($0.id) }
             self.messages.sort { $0.number("sequence") < $1.number("sequence") }
             self.messageCursor = (result["cursor"] as? NSNumber)?.intValue ?? self.messageCursor
-            if !self.archived { self.run("read", "inbox.read", ["id":selected.id, "sequence":selected.data["lastUserSequence"] ?? 0]) }
+            if self.visibleConversation,
+               let maxVisitorSeq = self.messages.filter({ $0.flag("visitor") }).map({ Int($0.number("sequence")) }).max(),
+               maxVisitorSeq > 0 {
+                self.run("read", "inbox.read", ["id": selected.id, "sequence": maxVisitorSeq])
+            }
         }
     }
+
     func fetchContact() {
-        guard let selected = selected else { return }; let revision = selectionRevision
-        run("contact", "inbox.contact", ["id":selected.id]) { if revision == self.selectionRevision { self.contact = $0 } }
+        guard let selected = selected else { return }
+        let revision = selectionRevision
+        run("contact", "inbox.contact", ["id": selected.id]) { if revision == self.selectionRevision { self.contact = $0 } }
     }
+
     func send() {
         guard !busy, !archived, let selected = selected else { return }
-        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines); guard !text.isEmpty else { return }
+        let text = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
         let messageID = failedReply?.text == text ? failedReply!.id : UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        AppModel.shared.confirm("发送回复？", "发送到会话 \(selected.text("title"))。\n\n\(text)", button: "发送") {
+        AppModel.shared.confirm("发送回复？", "发送到访客 · \(selected.text("title"))。\n\n\(text)", button: "发送回复") {
             self.failedReply = (messageID, text)
-            self.run("reply", "inbox.reply", ["id":selected.id, "messageID":messageID, "text":text], success: "回复已发送。") { result in
+            self.run("reply", "inbox.reply", ["id": selected.id, "messageID": messageID, "text": text], success: "回复已发送。") { result in
                 self.reply = ""; self.failedReply = nil
-                let row = DataRow(data: result); if !self.messages.contains(where: { $0.id == row.id }) { self.messages.append(row) }
+                let row = DataRow(data: result)
+                if !self.messages.contains(where: { $0.id == row.id }) { self.messages.append(row) }
             }
         }
     }
@@ -383,6 +803,10 @@ struct PostDraft: Equatable {
     private var savedResourceIDs: [Int] = []
     var resourceIDs: [Int] { resources.compactMap { ($0["id"] as? NSNumber)?.intValue } }
     var isDirty: Bool { content != savedContent || visibility != savedVisibility || resourceIDs != savedResourceIDs }
+    var filtered: [DataRow] {
+        guard !search.isEmpty else { return items }
+        return items.filter { $0.text("content").localizedCaseInsensitiveContains(search) }
+    }
     func assign(_ row: [String: Any]?) {
         original = row; selectedID = (row?["id"] as? NSNumber)?.stringValue
         content = row?["content"] as? String ?? ""; visibility = row?["visibility"] as? String ?? "PRIVATE"
@@ -405,16 +829,19 @@ struct PostDraft: Equatable {
     }
     func load(more: Bool = false) {
         let offset = more ? items.count : 0
-        run("list", "memos.list", ["state":archived ? "ARCHIVED" : "NORMAL", "text":search, "offset":offset]) { result in
+        run("list", "memos.list", ["state": archived ? "ARCHIVED" : "NORMAL", "text": search, "offset": offset]) { result in
             self.items = more ? self.items + rows(result["rows"]) : rows(result["rows"])
             self.more = (result["more"] as? NSNumber)?.boolValue ?? false; self.loaded = true
+            if !self.editing, self.selectedID == nil, let first = self.items.first {
+                self.assign(first.data)
+            }
         }
     }
     func save() {
         guard editing, !busy else { return }
         guard isDirty || original == nil else { successes["save"] = "说说没有变化，未发送写入。"; return }
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !resources.isEmpty else { errors["save"] = "正文与附件不能同时为空。"; return }
-        var args: [String: Any] = ["content":content, "visibility":visibility, "resourceIDs":resourceIDs]
+        var args: [String: Any] = ["content": content, "visibility": visibility, "resourceIDs": resourceIDs]
         if let original = original { args["original"] = original }
         let visibilityName = visibility == "PUBLIC" ? "公开" : visibility == "PROTECTED" ? "登录可见" : "仅自己"
         AppModel.shared.confirm(original == nil ? "创建说说？" : "保存说说？", "可见性：\(visibilityName)；附件：\(resources.count) 个。客户端会检查远端原记录，但 legacy API 不具备原子 CAS。", button: "保存到 Memos") {
@@ -425,18 +852,38 @@ struct PostDraft: Equatable {
         guard !busy, let original = original else { return }
         guard !isDirty else { errors["update"] = "请先保存或放弃正文修改，再执行此操作。"; return }
         AppModel.shared.confirm(title, "仅修改当前说说；不会自动重试结果未知的写入。", button: title) {
-            self.run("update", "memos.update", ["original":original, "fields":fields], success: "说说状态已更新。") { self.assign($0); self.load() }
+            self.run("update", "memos.update", ["original": original, "fields": fields], success: "说说状态已更新。") { self.assign($0); self.load() }
         }
     }
-    func importFiles(_ urls: [URL]) { if let url = urls.first { importFile(url) } }
+    func importFiles(_ urls: [URL]) {
+        guard !busy, editing, !urls.isEmpty else { return }
+        if urls.count == 1 {
+            importFile(urls[0])
+            return
+        }
+        let names = urls.map(\.lastPathComponent).joined(separator: "、")
+        AppModel.shared.confirm("上传 \(urls.count) 个附件到 Memos？", "将依次上传：\(names)\n上传后仍需保存说说才能建立关联；取消编辑不会自动删除服务端附件。", button: "全部上传") {
+            self.uploadQueue(urls)
+        }
+    }
+    private func uploadQueue(_ urls: [URL]) {
+        guard let next = urls.first else { return }
+        let remaining = Array(urls.dropFirst())
+        run("upload", "memos.upload", ["url": next], success: remaining.isEmpty ? "附件已全部上传；请保存说说以建立关联。" : nil) { resource in
+            self.resources.append(resource)
+            if !remaining.isEmpty {
+                self.uploadQueue(remaining)
+            }
+        }
+    }
     func importFile(_ url: URL) {
         guard !busy, editing else { return }
         AppModel.shared.confirm("上传附件到 Memos？", "将上传 \(url.lastPathComponent)。上传后仍需保存说说才能关联；取消编辑不会自动删除服务端附件。", button: "上传") {
-            self.run("upload", "memos.upload", ["url":url], success: "附件已上传；请保存说说以建立关联。") { self.resources.append($0) }
+            self.run("upload", "memos.upload", ["url": url], success: "附件已上传；请保存说说以建立关联。") { self.resources.append($0) }
         }
     }
     func openResource(_ resource: [String: Any]) {
-        run("download", "memos.download", ["resource":resource]) { if let url = $0["url"] as? URL { NSWorkspace.shared.open(url) } }
+        run("download", "memos.download", ["resource": resource]) { if let url = $0["url"] as? URL { NSWorkspace.shared.open(url) } }
     }
 }
 
@@ -448,14 +895,24 @@ struct PostDraft: Equatable {
     @Published var values: [String: String] = [:]
     @Published var baselineValues: [String: String] = [:]
     @Published var selectedSection = 0
+    @Published var search = ""
     @Published var preview = ""
     @Published var showingPreview = false
     var changedKeys: [String] { values.keys.filter { values[$0] != baselineValues[$0] }.sorted() }
     var isDirty: Bool { !changedKeys.isEmpty }
+    func dirtyCount(in section: DataRow) -> Int {
+        let keys = (section.data["keys"] as? [[String: Any]] ?? []).compactMap { $0["key"] as? String }
+        return keys.filter { values[$0] != baselineValues[$0] }.count
+    }
+    func resetKey(_ key: String) {
+        if let base = baselineValues[key] { values[key] = base }
+    }
     func apply(_ result: [String: Any]) {
         baseline = result["text"] as? String ?? ""; sha = result["sha"] as? String ?? ""; repository = result["repo"] as? String ?? ""
         values = result["values"] as? [String: String] ?? [:]; baselineValues = values
-        sections = (result["sections"] as? [[String: Any]] ?? []).enumerated().map { index, value in var copy = value; copy["id"] = String(index); return DataRow(data: copy) }
+        sections = (result["sections"] as? [[String: Any]] ?? []).enumerated().map { index, value in
+            var copy = value; copy["id"] = String(index); return DataRow(data: copy)
+        }
         selectedSection = min(selectedSection, max(0, sections.count - 1)); preview = ""
     }
     func refresh() {
@@ -463,8 +920,13 @@ struct PostDraft: Equatable {
         let action = { self.run("load", "env.load") { self.apply($0) } }
         if isDirty { AppModel.shared.confirm("重新载入并放弃配置修改？", "本地表单修改尚未提交到 main。", button: "放弃并载入", destructive: true, action: action) } else { action() }
     }
-    func revert() { guard !busy else { return }; AppModel.shared.confirm("放弃配置修改？", "恢复本次读取的 .env 基准，不会修改远端。", button: "放弃修改", destructive: true) { self.values = self.baselineValues; self.preview = "" } }
-    func arguments() -> [String: Any] { ["text":baseline, "values":values, "sha":sha, "repo":repository] }
+    func revert() {
+        guard !busy else { return }
+        AppModel.shared.confirm("放弃配置修改？", "恢复本次读取的 .env 基准，不会修改远端。", button: "放弃修改", destructive: true) {
+            self.values = self.baselineValues; self.preview = ""
+        }
+    }
+    func arguments() -> [String: Any] { ["text": baseline, "values": values, "sha": sha, "repo": repository] }
     func review() {
         guard isDirty, !busy else { return }
         let args = arguments()

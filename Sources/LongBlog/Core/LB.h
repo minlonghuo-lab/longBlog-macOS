@@ -36,6 +36,7 @@ extern NSString *const LBOpenSessionRequest;   // userInfo[@"sessionId"]
 @property (nonatomic, copy) NSString *baseURL;
 @property (nonatomic, copy, nullable) NSString *ownerKey;
 @property (nonatomic, readonly) NSUInteger connectionRevision;
+- (void)noteCredentialChange;
 - (BOOL)configured;
 - (void)fetchSessions:(void (^)(NSArray<LBSession *> *_Nullable s, NSError *_Nullable e))done;
 - (void)fetchArchivedSessions:(nullable NSString *)cursor
@@ -98,6 +99,7 @@ extern NSString *const LBSiteDataDidChange;
 
 @interface LBGitHub : NSObject
 + (instancetype)shared;
++ (void)noteCredentialChange;
 @property (nonatomic, copy, nullable) NSString *token; // Keychain
 - (BOOL)configured;
 /// Frozen repository + Keychain credential for an entire asynchronous operation.

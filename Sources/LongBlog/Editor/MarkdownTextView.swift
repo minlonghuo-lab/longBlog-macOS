@@ -55,9 +55,10 @@ enum MarkdownAction: String, CaseIterable, Identifiable {
 }
 
 /// Bridges SwiftUI toolbars / menus to the live AppKit text view.
-final class MarkdownEditorController {
+final class MarkdownEditorController: ObservableObject {
     weak var textView: MarkdownTextView?
     var onScroll: ((Double) -> Void)?
+    var onCursorChange: ((Int, Int) -> Void)?
     func perform(_ action: MarkdownAction) {
         guard let textView = textView else { return }
         textView.window?.makeFirstResponder(textView)
@@ -67,6 +68,10 @@ final class MarkdownEditorController {
         guard let textView = textView else { return }
         textView.window?.makeFirstResponder(textView)
         textView.insertBlock(text)
+    }
+    func focus() {
+        guard let textView = textView else { return }
+        textView.window?.makeFirstResponder(textView)
     }
     func reveal(location: Int) {
         guard let textView = textView else { return }
@@ -78,9 +83,80 @@ final class MarkdownEditorController {
     }
     /// Menu commands target whichever Markdown editor currently has keyboard focus.
     static var focused: MarkdownTextView? {
-        var window = NSApp.keyWindow
+        var window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: { $0.isVisible })
         while let sheet = window?.attachedSheet { window = sheet }
         return window?.firstResponder as? MarkdownTextView
+    }
+}
+
+// MARK: - Line number gutter
+
+final class MarkdownGutterView: NSRulerView {
+    weak var editorView: MarkdownTextView?
+
+    init(scrollView: NSScrollView, textView: MarkdownTextView) {
+        self.editorView = textView
+        super.init(scrollView: scrollView, orientation: .verticalRuler)
+        self.clientView = textView
+        self.ruleThickness = 40
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) { fatalError() }
+
+    override func drawHashMarksAndLabels(in rect: NSRect) {
+        guard let textView = editorView,
+              let layout = textView.layoutManager,
+              let container = textView.textContainer,
+              let clip = scrollView?.contentView else { return }
+
+        let s = textView.nsString
+        guard s.length <= 400_000 else { return }
+
+        // Subtle right separator line matching the warm studio gutter.
+        NSColor.lbMuted.withAlphaComponent(0.12).setFill()
+        NSRect(x: bounds.maxX - 1, y: rect.minY, width: 1, height: rect.height).fill()
+
+        let origin = textView.textContainerOrigin
+        let visibleInContainer = clip.bounds.offsetBy(dx: -origin.x, dy: -origin.y)
+        let glyphRange = layout.glyphRange(forBoundingRect: visibleInContainer, in: container)
+        let caretLineRange = s.lineRange(for: NSRange(location: min(textView.selectedRange().location, s.length), length: 0))
+        let font = NSFont.monospacedDigitSystemFont(ofSize: max(10, textView.highlighter.fontSize * 0.76), weight: .regular)
+        let activeFont = NSFont.monospacedDigitSystemFont(ofSize: max(10, textView.highlighter.fontSize * 0.76), weight: .semibold)
+        let mutedAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.lbMuted.withAlphaComponent(0.45)]
+        let activeAttrs: [NSAttributedString.Key: Any] = [.font: activeFont, .foregroundColor: NSColor.lbAccent]
+
+        if s.length == 0 {
+            let label = "1" as NSString
+            let size = label.size(withAttributes: activeAttrs)
+            let y = convert(NSPoint(x: 0, y: origin.y), from: textView).y + 2
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 10, y: y), withAttributes: activeAttrs)
+            return
+        }
+
+        layout.enumerateLineFragments(forGlyphRange: glyphRange) { lineRect, _, _, fragmentGlyphRange, _ in
+            let charRange = layout.characterRange(forGlyphRange: fragmentGlyphRange, actualGlyphRange: nil)
+            let position = textView.linePosition(at: charRange.location)
+            let isParagraphStart = position.column == 1
+            if isParagraphStart {
+                let isActive = NSLocationInRange(charRange.location, caretLineRange) || (caretLineRange.location == charRange.location)
+                let attrs = isActive ? activeAttrs : mutedAttrs
+                let label = "\(position.line)" as NSString
+                let size = label.size(withAttributes: attrs)
+                let y = self.convert(NSPoint(x: 0, y: lineRect.minY + origin.y), from: textView).y + max(0, (lineRect.height - size.height) * 0.42)
+                label.draw(at: NSPoint(x: self.ruleThickness - size.width - 10, y: y), withAttributes: attrs)
+            }
+        }
+
+        if layout.extraLineFragmentTextContainer != nil {
+            let extraRect = layout.extraLineFragmentRect
+            let isActive = textView.selectedRange().location == s.length
+            let attrs = isActive ? activeAttrs : mutedAttrs
+            let label = "\(textView.linePosition(at: s.length).line)" as NSString
+            let size = label.size(withAttributes: attrs)
+            let y = convert(NSPoint(x: 0, y: extraRect.minY + origin.y), from: textView).y + max(0, (extraRect.height - size.height) * 0.42)
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 10, y: y), withAttributes: attrs)
+        }
     }
 }
 
@@ -89,6 +165,10 @@ final class MarkdownEditorController {
 final class MarkdownTextView: NSTextView {
     var onImportFiles: (([URL]) -> Void)?
     var highlighter = MarkdownHighlighter()
+    var highlightsCurrentLine = true
+    private var receivingFileDrag = false {
+        didSet { if oldValue != receivingFileDrag { needsDisplay = true } }
+    }
 
     // Formatting shortcuts are handled before the main menu so ⌘B/⌘I/⌘K work even when
     // the menu bar has no matching item; they only fire while this editor is focused.
@@ -119,6 +199,50 @@ final class MarkdownTextView: NSTextView {
 
     // MARK: Editing primitives (all undoable)
 
+    // Index logical lines on demand. An edit invalidates only its line and suffix.
+    private var lineStarts = [0]
+    private var indexedThrough = 0
+    private weak var indexedStorage: NSTextStorage?
+
+    private func lineIndex(at offset: Int) -> Int {
+        var low = 0, high = lineStarts.count
+        while high - low > 1 {
+            let mid = low + (high - low) / 2
+            if lineStarts[mid] <= offset { low = mid } else { high = mid }
+        }
+        return low
+    }
+
+    @objc private func storageDidEdit(_ notification: Notification) {
+        guard let storage = notification.object as? NSTextStorage,
+              storage.editedMask.contains(.editedCharacters) else { return }
+        // The preceding character may now be part of a CRLF pair.
+        let index = lineIndex(at: max(0, storage.editedRange.location - 1))
+        lineStarts.removeSubrange((index + 1)..<lineStarts.count)
+        indexedThrough = lineStarts[index]
+    }
+
+    func linePosition(at location: Int) -> (line: Int, column: Int) {
+        guard let storage = textStorage else { return (1, 1) }
+        if indexedStorage !== storage {
+            if let old = indexedStorage { NotificationCenter.default.removeObserver(self, name: NSTextStorage.didProcessEditingNotification, object: old) }
+            indexedStorage = storage
+            lineStarts = [0]
+            indexedThrough = 0
+            NotificationCenter.default.addObserver(self, selector: #selector(storageDidEdit(_:)), name: NSTextStorage.didProcessEditingNotification, object: storage)
+        }
+        let text = storage.mutableString
+        let offset = min(max(0, location), text.length)
+        while indexedThrough < offset {
+            var end = 0, contentsEnd = 0
+            text.getLineStart(nil, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: indexedThrough, length: 0))
+            if contentsEnd < end { lineStarts.append(end) }
+            indexedThrough = end
+        }
+        let index = lineIndex(at: offset)
+        return (index + 1, offset - lineStarts[index] + 1)
+    }
+
     var nsString: NSString { string as NSString }
 
     @discardableResult
@@ -139,7 +263,7 @@ final class MarkdownTextView: NSTextView {
     }
 
     func apply(_ action: MarkdownAction) {
-        guard isEditable else { return }
+        guard isEditable, !hasMarkedText() else { return }
         switch action {
         case .bold: wrap("**", "**", placeholder: "粗体文字")
         case .italic: wrap("*", "*", placeholder: "斜体文字")
@@ -188,7 +312,6 @@ final class MarkdownTextView: NSTextView {
     private func insertLink(image: Bool) {
         let sel = selectedRange()
         let selected = nsString.substring(with: sel)
-        let clipboard = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let isURL: (String) -> Bool = { $0.range(of: #"^(https?://|/|\./)\S+$"#, options: .regularExpression) != nil }
         let bang = image ? "!" : ""
         if isURL(selected) {
@@ -196,6 +319,7 @@ final class MarkdownTextView: NSTextView {
             replace(sel, with: "\(bang)[\(label)](\(selected))", select: NSRange(location: sel.location + (bang as NSString).length + 1, length: (label as NSString).length))
         } else {
             let label = selected.isEmpty ? (image ? "图片描述" : "链接文字") : selected
+            let clipboard = NSPasteboard.general.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let url = isURL(clipboard) ? clipboard : "https://"
             let text = "\(bang)[\(label)](\(url))"
             let urlStart = sel.location + (bang as NSString).length + (label as NSString).length + 3
@@ -362,7 +486,23 @@ final class MarkdownTextView: NSTextView {
         pasteAsPlainText(sender)
     }
 
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if onImportFiles != nil,
+           let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
+           !urls.isEmpty {
+            receivingFileDrag = true
+            return .copy
+        }
+        return super.draggingEntered(sender)
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        receivingFileDrag = false
+        super.draggingExited(sender)
+    }
+
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        receivingFileDrag = false
         let board = sender.draggingPasteboard
         if onImportFiles != nil,
            let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
@@ -373,6 +513,41 @@ final class MarkdownTextView: NSTextView {
             return true
         }
         return super.performDragOperation(sender)
+    }
+
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        if highlightsCurrentLine, window?.firstResponder === self, selectedRange().length == 0,
+           let layout = layoutManager, let container = textContainer, nsString.length <= 400_000 {
+            let sel = NSRange(location: min(selectedRange().location, nsString.length), length: 0)
+            let lineRect: NSRect
+            if sel.location == nsString.length && (nsString.length == 0 || nsString.character(at: nsString.length - 1) == 10),
+               layout.extraLineFragmentTextContainer != nil {
+                lineRect = layout.extraLineFragmentRect
+            } else {
+                let paraRange = nsString.lineRange(for: sel)
+                let glyphRange = layout.glyphRange(forCharacterRange: paraRange, actualCharacterRange: nil)
+                lineRect = layout.boundingRect(forGlyphRange: glyphRange, in: container)
+            }
+            if lineRect.height > 0 {
+                let band = NSRect(x: 0, y: lineRect.minY + textContainerOrigin.y, width: bounds.width, height: lineRect.height)
+                if band.intersects(rect) {
+                    NSColor.lbAccent.withAlphaComponent(0.042).setFill()
+                    band.fill()
+                }
+            }
+        }
+        if receivingFileDrag, let visible = enclosingScrollView?.documentVisibleRect {
+            let frame = visible.insetBy(dx: 6, dy: 6)
+            let path = NSBezierPath(roundedRect: frame, xRadius: 10, yRadius: 10)
+            NSColor.lbAccent.withAlphaComponent(0.06).setFill()
+            path.fill()
+            path.lineWidth = 1.5
+            let dash: [CGFloat] = [6, 4]
+            path.setLineDash(dash, count: 2, phase: 0)
+            NSColor.lbAccent.withAlphaComponent(0.7).setStroke()
+            path.stroke()
+        }
     }
 
     static func writeTemporaryPNG(_ image: NSImage) -> URL? {
@@ -490,6 +665,7 @@ struct MarkdownTextEditor: NSViewRepresentable {
     var editable = true
     var fontSize: CGFloat = 15
     var monospaced = false
+    var showLineNumbers = false
     var maxContentWidth: CGFloat? = nil
     var onImportFiles: (([URL]) -> Void)?
 
@@ -530,36 +706,59 @@ struct MarkdownTextEditor: NSViewRepresentable {
         textView.smartInsertDeleteEnabled = false
         textView.drawsBackground = false
         textView.insertionPointColor = .lbAccent
-        textView.textContainerInset = NSSize(width: 22, height: 20)
+        textView.textContainerInset = NSSize(width: 24, height: 22)
         textView.delegate = context.coordinator
         textView.setAccessibilityLabel("Markdown 正文编辑器")
         scroll.documentView = textView
+
+        let gutter = MarkdownGutterView(scrollView: scroll, textView: textView)
+        scroll.verticalRulerView = gutter
+        scroll.hasVerticalRuler = true
+        scroll.rulersVisible = showLineNumbers
+
         scroll.contentView.postsBoundsChangedNotifications = true
+        scroll.contentView.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.didScroll(_:)),
                                                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.didResize(_:)),
+                                               name: NSView.frameDidChangeNotification, object: scroll.contentView)
         context.coordinator.textView = textView
-        configure(textView, context: context, initial: true)
+        context.coordinator.gutter = gutter
+        configure(textView, scroll: scroll, context: context, initial: true)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let textView = scroll.documentView as? MarkdownTextView else { return }
         context.coordinator.parent = self
-        configure(textView, context: context, initial: false)
+        configure(textView, scroll: scroll, context: context, initial: false)
     }
 
-    private func configure(_ textView: MarkdownTextView, context: Context, initial: Bool) {
+    static func applyContentInset(to textView: MarkdownTextView, scroll: NSScrollView?, maxContentWidth: CGFloat?) {
+        let baseInset: CGFloat = scroll?.rulersVisible == true ? 18 : 24
+        let targetWidth: CGFloat
+        if let width = maxContentWidth, let scroll = scroll {
+            targetWidth = max(baseInset, (scroll.contentSize.width - width) / 2)
+        } else {
+            targetWidth = baseInset
+        }
+        if abs(textView.textContainerInset.width - targetWidth) > 0.5 || abs(textView.textContainerInset.height - 22) > 0.5 {
+            textView.textContainerInset = NSSize(width: targetWidth, height: 22)
+        }
+    }
+
+    private func configure(_ textView: MarkdownTextView, scroll: NSScrollView, context: Context, initial: Bool) {
         controller?.textView = textView
         textView.onImportFiles = onImportFiles
         textView.isEditable = editable
+        if scroll.rulersVisible != showLineNumbers {
+            scroll.rulersVisible = showLineNumbers
+        }
         var styleChanged = false
         if textView.highlighter.fontSize != fontSize || textView.highlighter.monospaced != monospaced {
             textView.highlighter.fontSize = fontSize; textView.highlighter.monospaced = monospaced; styleChanged = true
         }
-        if let width = maxContentWidth, let scroll = textView.enclosingScrollView {
-            let inset = max(22, (scroll.contentSize.width - width) / 2)
-            if abs(textView.textContainerInset.width - inset) > 0.5 { textView.textContainerInset = NSSize(width: inset, height: 20) }
-        }
+        Self.applyContentInset(to: textView, scroll: scroll, maxContentWidth: maxContentWidth)
         let coordinator = context.coordinator
         if initial || coordinator.documentID != documentID {
             coordinator.documentID = documentID
@@ -569,23 +768,28 @@ struct MarkdownTextEditor: NSViewRepresentable {
             textView.setSelectedRange(NSRange(location: 0, length: 0))
             textView.scroll(.zero)
             textView.rehighlight()
+            coordinator.reportCursor()
+            coordinator.gutter?.needsDisplay = true
         } else if textView.string != text, !textView.hasMarkedText() {
             // External change of the same document (AI apply, attachment): keep it undoable.
             let full = NSRange(location: 0, length: (textView.string as NSString).length)
             let sel = textView.selectedRange()
-            if textView.replace(full, with: text) {
-                let length = (text as NSString).length
-                textView.setSelectedRange(NSRange(location: min(sel.location, length), length: 0))
-            }
+            let targetSel = NSRange(location: min(sel.location, (text as NSString).length), length: 0)
+            _ = textView.replace(full, with: text, select: targetSel)
+            if targetSel.location == 0 { textView.scroll(.zero) }
             textView.rehighlight()
+            coordinator.reportCursor()
+            coordinator.gutter?.needsDisplay = true
         } else if styleChanged {
             textView.rehighlight()
+            coordinator.gutter?.needsDisplay = true
         }
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: MarkdownTextEditor
         weak var textView: MarkdownTextView?
+        weak var gutter: MarkdownGutterView?
         var documentID: String?
         private var pendingHighlight: DispatchWorkItem?
         init(_ parent: MarkdownTextEditor) { self.parent = parent }
@@ -594,20 +798,43 @@ struct MarkdownTextEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView = textView else { return }
             if parent.text != textView.string { parent.text = textView.string }
+            gutter?.needsDisplay = true
             // Coalesced, never while the IME is composing. Short posts restyle on the next
             // run-loop turn; long ones (regex cost grows linearly) wait for a typing pause.
             pendingHighlight?.cancel()
             let length = (textView.string as NSString).length
             let delay = length < 12_000 ? 0 : min(0.45, Double(length) / 160_000)
-            let work = DispatchWorkItem { [weak self] in self?.textView?.rehighlight() }
+            let work = DispatchWorkItem { [weak self] in
+                self?.textView?.rehighlight()
+                self?.gutter?.needsDisplay = true
+            }
             pendingHighlight = work
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         }
 
+        func textViewDidChangeSelection(_ notification: Notification) {
+            textView?.needsDisplay = true
+            gutter?.needsDisplay = true
+            reportCursor()
+        }
+
+        func reportCursor() {
+            guard let textView = textView, let callback = parent.controller?.onCursorChange else { return }
+            let position = textView.linePosition(at: textView.selectedRange().location)
+            callback(position.line, position.column)
+        }
+
         @objc func didScroll(_ notification: Notification) {
+            gutter?.needsDisplay = true
             guard let clip = notification.object as? NSClipView, let doc = clip.documentView else { return }
             let range = doc.frame.height - clip.bounds.height
             parent.controller?.onScroll?(range > 1 ? Double(max(0, min(1, clip.bounds.minY / range))) : 0)
+        }
+
+        @objc func didResize(_ notification: Notification) {
+            guard let textView = textView else { return }
+            MarkdownTextEditor.applyContentInset(to: textView, scroll: textView.enclosingScrollView, maxContentWidth: parent.maxContentWidth)
+            gutter?.needsDisplay = true
         }
     }
 }

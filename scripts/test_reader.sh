@@ -2,6 +2,9 @@
 # Native WebKit integration harness; not distributed in the main app or DMG.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 APP="$PWD/build/ReaderSmoke.app"
 rm -rf "$APP"

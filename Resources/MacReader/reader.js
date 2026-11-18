@@ -187,6 +187,8 @@ async function render(payload) {
     if (!payload || typeof payload.body !== 'string' || payload.body.length > MAX_BODY) throw Error('文章超过 4 MiB 预览上限，正文未被截断；请在编辑器中查看。');
     status.hidden=false;status.textContent='';
     doc.body.classList.toggle('compact', payload.compact === true);
+    const theme = payload.theme === 'paper' || payload.theme === 'dark' ? payload.theme : 'auto';
+    doc.documentElement.setAttribute('data-theme', theme);
     const titleNode=doc.getElementById('doc-title');
     if (titleNode) {const t=typeof payload.title === 'string' ? payload.title.trim().slice(0,500) : '';titleNode.textContent=t;titleNode.hidden=!t;}
     const html=payload.bodyFormat === 'html' ? payload.body : markdownHTML(payload.body);

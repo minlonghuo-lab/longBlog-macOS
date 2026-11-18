@@ -2,6 +2,9 @@
 # Build from a clean object directory; no Xcode project generator or dependencies.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [[ -z "${DEVELOPER_DIR:-}" && -d /Applications/Xcode.app/Contents/Developer ]]; then
+  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 ROOT="$PWD"
 BUILD="$ROOT/build"
 APP="$BUILD/longBlog.app"
@@ -71,9 +74,6 @@ xcrun swiftc -swift-version 5 -parse-as-library -sdk "$SDK" Sources/LongBlog/Edi
   tests/EditorFixtures.swift -o "$BUILD/EditorFixtures"
 "$BUILD/EditorFixtures"
 "$BUILD/AIEndpointFixtures"
-xcrun swiftc -swift-version 5 -parse-as-library -sdk "$SDK" Sources/LongBlog/Editor/MarkdownTextView.swift \
-  tests/EditorFixtures.swift -o "$BUILD/EditorFixtures"
-"$BUILD/EditorFixtures"
 mkdir -p "$BUILD/dmg-root"
 cp -R "$APP" "$BUILD/dmg-root/longBlog.app"
 ln -s /Applications "$BUILD/dmg-root/Applications"

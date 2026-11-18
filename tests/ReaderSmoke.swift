@@ -98,6 +98,9 @@ private final class ReaderSmokeRunner {
     private var timer: DispatchSourceTimer?
     private var started = Date()
     private var polling = false
+    private let themes = ["auto", "paper", "dark"]
+    private var themeIndex = 0
+    private var firstTimeOrigin: Double?
     private var navigationDispatched = false
     private var finishing = false
     private var assertions: [String: Bool] = [:]
@@ -183,6 +186,19 @@ private final class ReaderSmokeRunner {
             let initialPass = Self.checkKeys.allSatisfy { self.assertions[$0] == true } &&
                 self.assertions["nativeAppDocument"] == true
             guard initialPass else { return }
+            let theme = self.themes[self.themeIndex]
+            guard checks["theme"] as? String == theme,
+                  let origin = checks["timeOrigin"] as? Double else { return }
+            if self.firstTimeOrigin == nil { self.firstTimeOrigin = origin }
+            self.assertions["theme_" + theme] = origin == self.firstTimeOrigin
+            if self.themeIndex + 1 < self.themes.count,
+               let host = content as? NSHostingView<ReaderView> {
+                self.themeIndex += 1
+                var reader = host.rootView
+                reader.paperTheme = self.themes[self.themeIndex]
+                host.rootView = reader
+                return
+            }
             if !self.navigationDispatched {
                 guard let original = web.navigationDelegate else { self.finish(false, reason: "missing_production_delegate"); return }
                 let probe = NavigationProbe(original: original)
@@ -268,6 +284,8 @@ private final class ReaderSmokeRunner {
     const unmapped = label => blocked.some(node => node.textContent.startsWith('图片未加载') && node.textContent.includes(label));
     const unavailable = label => blocked.some(node => node.textContent === '本地图片不可用：' + label);
     return {
+      theme: document.documentElement.dataset.theme,
+      timeOrigin: performance.timeOrigin,
       diagnostics: {
         localElement: local ? 1 : 0,
         localComplete: local && local.complete ? 1 : 0,
