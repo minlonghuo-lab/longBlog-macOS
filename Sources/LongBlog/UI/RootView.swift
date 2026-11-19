@@ -30,6 +30,7 @@ struct RootView: View {
                     .toolbar {
                         if !(app.section == .configuration && configuration.baseline.isEmpty && !configuration.isDirty)
                             && !(app.section == .posts && app.focusMode) {
+                            #if compiler(>=6.2)
                             if #available(macOS 26.0, *) {
                                 ToolbarItem(placement: .principal) {
                                     toolbarCenterControls
@@ -40,9 +41,15 @@ struct RootView: View {
                                     toolbarCenterControls
                                 }
                             }
+                            #else
+                            ToolbarItem(placement: .principal) {
+                                toolbarCenterControls
+                            }
+                            #endif
                         }
 
                         if busy {
+                            #if compiler(>=6.2)
                             if #available(macOS 26.0, *) {
                                 ToolbarItem(placement: .primaryAction) {
                                     ProgressView()
@@ -55,6 +62,12 @@ struct RootView: View {
                                         .controlSize(.small)
                                 }
                             }
+                            #else
+                            ToolbarItem(placement: .primaryAction) {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            #endif
                         }
 
                         ToolbarItem(placement: .primaryAction) {
@@ -68,11 +81,14 @@ struct RootView: View {
                             .disabled(busy)
                         }
 
+                        #if compiler(>=6.2)
                         if #available(macOS 26.0, *) {
                             ToolbarSpacer(.fixed, placement: .primaryAction)
                         }
+                        #endif
 
                         if app.section == .posts && app.focusMode {
+                            #if compiler(>=6.2)
                             if #available(macOS 26.0, *) {
                                 ToolbarItem(placement: .primaryAction) {
                                     Button { posts.save() } label: {
@@ -95,8 +111,19 @@ struct RootView: View {
                                     .help("保存到本地  ⌘S")
                                 }
                             }
+                            #else
+                            ToolbarItem(placement: .primaryAction) {
+                                Button { posts.save() } label: {
+                                    Text("保存")
+                                }
+                                .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                                .disabled(!posts.isDirty || posts.busy)
+                                .help("保存到本地  ⌘S")
+                            }
+                            #endif
                         }
 
+                        #if compiler(>=6.2)
                         if #available(macOS 26.0, *) {
                             ToolbarItem(placement: .primaryAction) {
                                 primaryAction
@@ -107,6 +134,11 @@ struct RootView: View {
                                 primaryAction
                             }
                         }
+                        #else
+                        ToolbarItem(placement: .primaryAction) {
+                            primaryAction
+                        }
+                        #endif
                     }
             }
             .navigationSplitViewStyle(.balanced)
