@@ -328,6 +328,130 @@ struct ShortcutCap: View {
     }
 }
 
+// MARK: - Window toolbar
+
+enum WorkspaceToolbarMetrics {
+    // Unified height for all top-toolbar controls on macOS 26+.
+    static let height: CGFloat = 34
+    static let trailingInset: CGFloat = 22
+}
+
+/// Icon-only action in the unified window toolbar.
+struct ToolbarIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        BodyView(configuration: configuration)
+    }
+    private struct BodyView: View {
+        let configuration: ButtonStyle.Configuration
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+        var body: some View {
+            let base = configuration.label
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.blogText)
+                .frame(width: WorkspaceToolbarMetrics.height, height: WorkspaceToolbarMetrics.height)
+                .contentShape(Circle())
+            Group {
+                #if compiler(>=6.2)
+                if #available(macOS 26.0, *) {
+                    base
+                        .background(Circle().fill(Color.blogSurface.opacity(hovering ? 0.9 : 0.5)))
+                        .glassEffect(.regular.interactive(), in: Circle())
+                        .overlay(Circle().strokeBorder(Color.blogStrokeStrong, lineWidth: 0.7))
+                } else {
+                    base
+                        .background(hovering ? Color.blogSurfaceHover : Color.blogSurface, in: Circle())
+                        .overlay(Circle().strokeBorder(Color.blogStrokeStrong, lineWidth: 0.8))
+                }
+                #else
+                base
+                    .background(hovering ? Color.blogSurfaceHover : Color.blogSurface, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.blogStrokeStrong, lineWidth: 0.8))
+                #endif
+            }
+            .opacity(isEnabled ? 1 : 0.42)
+            .scaleEffect(configuration.isPressed && isEnabled ? 0.95 : 1)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+        }
+    }
+}
+
+/// Labeled action in the unified window toolbar.
+struct ToolbarPillButtonStyle: ButtonStyle {
+    var prominent = true
+    var minWidth: CGFloat = 118
+    func makeBody(configuration: Configuration) -> some View {
+        BodyView(configuration: configuration, prominent: prominent, minWidth: minWidth)
+    }
+    private struct BodyView: View {
+        let configuration: ButtonStyle.Configuration
+        let prominent: Bool
+        let minWidth: CGFloat
+        @Environment(\.isEnabled) private var isEnabled
+        @State private var hovering = false
+        var body: some View {
+            let fg: Color = prominent
+                ? (isEnabled ? Color.blogPeachInk : Color.blogMuted)
+                : Color.blogText
+            let base = configuration.label
+                .font(.system(size: 12.5, weight: prominent ? .semibold : .medium))
+                .foregroundStyle(fg)
+                .padding(.horizontal, 14)
+                .frame(minWidth: minWidth, minHeight: WorkspaceToolbarMetrics.height, maxHeight: WorkspaceToolbarMetrics.height)
+                .contentShape(Capsule())
+            Group {
+                #if compiler(>=6.2)
+                if #available(macOS 26.0, *) {
+                    if prominent {
+                        base
+                            .background(
+                                Capsule().fill(isEnabled ? Color.blogPeach.opacity(0.88) : Color.blogSurface)
+                            )
+                            .glassEffect(
+                                isEnabled ? .regular.tint(.blogPeach).interactive() : .regular,
+                                in: Capsule()
+                            )
+                            .overlay(
+                                Capsule().strokeBorder(
+                                    isEnabled ? Color.white.opacity(0.28) : Color.blogStroke,
+                                    lineWidth: 0.75
+                                )
+                            )
+                    } else {
+                        base
+                            .background(Capsule().fill(Color.blogSurface.opacity(hovering ? 0.9 : 0.55)))
+                            .glassEffect(.regular.interactive(), in: Capsule())
+                            .overlay(Capsule().strokeBorder(Color.blogStrokeStrong, lineWidth: 0.75))
+                    }
+                } else {
+                    legacyPill(base: base)
+                }
+                #else
+                legacyPill(base: base)
+                #endif
+            }
+            .opacity(isEnabled ? 1 : (prominent ? 0.58 : 0.45))
+            .scaleEffect(configuration.isPressed && isEnabled ? 0.97 : 1)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+        }
+
+        @ViewBuilder
+        private func legacyPill<V: View>(base: V) -> some View {
+            if prominent {
+                base
+                    .background(isEnabled ? Color.blogPeach : Color.blogSurface, in: Capsule())
+                    .overlay(Capsule().strokeBorder(isEnabled ? Color.white.opacity(0.22) : Color.blogStroke))
+            } else {
+                base
+                    .background(hovering ? Color.blogSurfaceHover : Color.blogSurface, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Color.blogStrokeStrong))
+            }
+        }
+    }
+}
+
 struct SegmentedOption<Value: Hashable>: Identifiable {
     let value: Value
     let label: String
@@ -343,24 +467,36 @@ private struct SegmentFrameKey: PreferenceKey {
     }
 }
 
-/// Official-style interactive Liquid Glass segmented control:
-/// Tap any segment, or press-and-hold the Liquid Glass lens to glide 1:1 across segments at 120fps.
-/// Strictly keeps the current page unchanged while the mouse button is held down (`onChanged`),
-/// and commits `selection` only when the mouse button is released (`onEnded`).
+private struct SegmentTrackSizeKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next.width > 0 && next.height > 0 { value = next }
+    }
+}
+
+/// The iOS workspace tabs use UIKit's system tab bar. On Mac the moving lens
+/// uses SwiftUI glass, with a magnified copy of the labels under the pointer.
 struct BlogSegmentedControl<Value: Hashable>: View {
     let options: [SegmentedOption<Value>]
     @Binding var selection: Value
     var compact = false
     var onLightSurface = false
+    var toolbarSized = false
 
     @Environment(\.isEnabled) private var isEnabled
     @State private var segmentFrames: [Int: CGRect] = [:]
+    @State private var trackSize: CGSize = .zero
     @State private var isDragging = false
     @State private var dragCenterX: CGFloat? = nil
     @State private var dragGrabOffset: CGFloat = 0
+    @State private var dragStretch: CGFloat = 1.0
+    @State private var lastDragX: CGFloat? = nil
     @State private var didCaptureGrab = false
     @State private var hoveredIndex: Int? = nil
     @State private var pendingIndex: Int? = nil
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @GestureState private var tracking = false
 
     private var selectedIndex: Int {
         options.firstIndex(where: { $0.value == selection }) ?? 0
@@ -391,10 +527,10 @@ struct BlogSegmentedControl<Value: Hashable>: View {
         let clampedCenter: CGFloat
         if rawX < minCenter {
             let over = minCenter - rawX
-            clampedCenter = minCenter - (1 - exp(-over / 24)) * 3.5
+            clampedCenter = minCenter - (1 - exp(-over / 26)) * 5.0
         } else if rawX > maxCenter {
             let over = rawX - maxCenter
-            clampedCenter = maxCenter + (1 - exp(-over / 24)) * 3.5
+            clampedCenter = maxCenter + (1 - exp(-over / 26)) * 5.0
         } else {
             clampedCenter = rawX
         }
@@ -421,148 +557,372 @@ struct BlogSegmentedControl<Value: Hashable>: View {
         return CGRect(x: clampedCenter - interpWidth / 2, y: first.minY, width: interpWidth, height: first.height)
     }
 
+    /// Expanded droplet loupe frame when pressing/dragging — extends above & below the capsule track like iOS 26.
+    private var activeLoupeRect: CGRect {
+        let base = currentLensFrame
+        guard base.width > 1 && base.height > 1 else { return base }
+        let extraW: CGFloat = base.width * (0.16 + (reduceMotion ? 0 : dragStretch - 1))
+        let baseExtraH: CGFloat = toolbarSized ? 7.5 : (compact ? 11.5 : 14.0)
+        let extraH: CGFloat = baseExtraH / sqrt(max(0.92, dragStretch))
+        return CGRect(
+            x: base.minX - extraW / 2,
+            y: base.minY - extraH / 2,
+            width: base.width + extraW,
+            height: base.height + extraH
+        )
+    }
+
     var body: some View {
+        let frame = currentLensFrame
+        let loupe = activeLoupeRect
+        let trackPad: CGFloat = toolbarSized ? 3.5 : 3.0
+
         let trackContent = ZStack(alignment: .topLeading) {
-            let frame = currentLensFrame
+            // Resting pill (visible when not dragging)
             if frame.width > 1 && frame.height > 1 {
-                lensView
+                restingPillView
                     .frame(width: frame.width, height: frame.height)
-                    .scaleEffect(x: isDragging ? 1.025 : 1.0, y: isDragging ? 1.05 : 1.0, anchor: .center)
                     .offset(x: frame.minX, y: frame.minY)
-                    .animation(.spring(response: 0.24, dampingFraction: 0.84), value: activeVisualIndex)
-                    .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isDragging)
-                    .transaction { tx in
-                        if isDragging {
-                            // Locked 1:1 cursor tracking during drag (zero spring chase lag).
-                            tx.animation = nil
-                        }
-                    }
+                    .opacity(isDragging ? 0 : 1)
+                    .animation(.spring(response: 0.25, dampingFraction: 0.82), value: activeVisualIndex)
+                    .animation(.easeOut(duration: 0.12), value: isDragging)
                     .allowsHitTesting(false)
             }
 
-            HStack(spacing: 2) {
-                ForEach(Array(options.enumerated()), id: \.element.id) { idx, opt in
-                    let active = idx == activeVisualIndex
-                    HStack(spacing: 5) {
-                        if let symbol = opt.symbol {
-                            Image(systemName: symbol)
-                                .font(.system(size: compact ? 11 : 12, weight: active ? .semibold : .regular))
-                        }
-                        Text(opt.label)
-                            .font(.system(size: compact ? 11.5 : 12.5, weight: active ? .semibold : .medium))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                        if let count = opt.count {
-                            Text("\(count)")
-                                .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
-                                .foregroundStyle(active ? Color.blogPeach : Color.blogMuted)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
+            // Base segment labels row (measures each segment frame)
+            segmentsRow(inLoupe: false)
+                .mask {
+                    if isDragging {
+                        // Clear only the pixels under the lens. A label that straddles
+                        // its edge stays readable on both sides.
+                        Rectangle().overlay(alignment: .topLeading) {
+                            Capsule().frame(width: loupe.width, height: loupe.height)
+                                .offset(x: loupe.minX, y: loupe.minY)
+                                .blendMode(.destinationOut)
+                        }.compositingGroup()
+                    } else {
+                        Rectangle()
+                    }
+                }
+        }
+        .coordinateSpace(name: "lb-seg-track")
+        .padding(trackPad)
+        .background(
+            GeometryReader { geo in
+                Color.clear.preference(key: SegmentTrackSizeKey.self, value: geo.size)
+            }
+        )
+        .onPreferenceChange(SegmentFrameKey.self) { next in
+            if framesChangedSignificantly(segmentFrames, next) {
+                segmentFrames = next
+            }
+        }
+        .onPreferenceChange(SegmentTrackSizeKey.self) { next in
+            if abs(trackSize.width - next.width) > 0.5 || abs(trackSize.height - next.height) > 0.5 {
+                trackSize = next
+            }
+        }
+        .onChange(of: selection) { _, _ in
+            pendingIndex = nil
+        }
+        .onAppear {
+            if ProcessInfo.processInfo.arguments.contains("--smoke-loupe") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                    if let f0 = segmentFrames[0], let f1 = segmentFrames[1] {
+                        withAnimation(.spring(response: 0.26, dampingFraction: 0.78)) {
+                            isDragging = true
+                            dragCenterX = f0.midX + (f1.midX - f0.midX) * 0.36
+                            hoveredIndex = 0
+                            dragStretch = 1.05
                         }
                     }
-                    .fixedSize(horizontal: true, vertical: false)
-                    .foregroundStyle(labelColor(active: active))
-                    .padding(.horizontal, compact ? 10 : 12)
-                    .padding(.vertical, compact ? 4.5 : 5.5)
-                    .contentShape(Capsule())
-                    .background(
+                }
+            }
+        }
+        .contentShape(Capsule())
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .local)
+                .updating($tracking) { _, tracking, _ in tracking = true }
+                .onChanged { value in
+                    guard isEnabled, !segmentFrames.isEmpty else { return }
+                    let localX = value.location.x - trackPad
+                    let startLocalX = value.startLocation.x - trackPad
+                    if !didCaptureGrab {
+                        didCaptureGrab = true
+                        pendingIndex = nil
+                        if let selFrame = segmentFrames[selectedIndex],
+                           selFrame.insetBy(dx: -4, dy: -8).contains(CGPoint(x: startLocalX, y: selFrame.midY)) {
+                            dragGrabOffset = startLocalX - selFrame.midX
+                        } else {
+                            dragGrabOffset = 0
+                        }
+                        // Activate optical Liquid Glass droplet loupe immediately on press-and-hold!
+                        withAnimation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.76)) {
+                            isDragging = true
+                        }
+                        let initialCenter = (nearestIndex(for: startLocalX) == selectedIndex)
+                            ? (segmentFrames[selectedIndex]?.midX ?? startLocalX)
+                            : startLocalX
+                        dragCenterX = initialCenter
+                        lastDragX = initialCenter
+                        hoveredIndex = nearestIndex(for: initialCenter) ?? selectedIndex
+                        return
+                    }
+
+                    let effectiveX = localX - dragGrabOffset
+                    if let prev = lastDragX {
+                        let speed = abs(effectiveX - prev)
+                        dragStretch = 1.0 + min(0.11, speed * 0.0065)
+                    }
+                    lastDragX = effectiveX
+                    dragCenterX = effectiveX
+                    if let nearest = nearestIndex(for: effectiveX), nearest != hoveredIndex {
+                        hoveredIndex = nearest
+                        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                    }
+                }
+                .onEnded { value in
+                    let x = value.location.x - trackPad - dragGrabOffset
+                    let target = nearestIndex(for: x) ?? hoveredIndex ?? selectedIndex
+                    let wasHorizontalSlide = abs(value.translation.width) > 3
+                    let releaseBounds = CGRect(origin: .zero, size: trackSize)
+                        .insetBy(dx: -12, dy: -28)
+                    let validRelease = wasHorizontalSlide || releaseBounds.contains(value.location)
+                    if isEnabled && validRelease {
+                        pendingIndex = target
+                    }
+                    finishTracking()
+                    guard isEnabled, validRelease,
+                          options.indices.contains(target),
+                          options[target].value != selection else {
+                        pendingIndex = nil
+                        return
+                    }
+                    selection = options[target].value
+                }
+        )
+        .onChange(of: tracking) { _, active in
+            if !active && isDragging { finishTracking() }
+        }
+        .opacity(isEnabled ? 1 : 0.48)
+
+        trackContent
+            .frame(height: toolbarSized ? WorkspaceToolbarMetrics.height : nil)
+            .background(
+                Capsule().fill(onLightSurface ? Color.black.opacity(0.065) : Color.blogSlot)
+            )
+            .overlay(
+                Capsule().strokeBorder(onLightSurface ? Color.black.opacity(0.08) : Color.blogStrokeStrong.opacity(0.85))
+            )
+            // iOS 26 Refractive Liquid Glass Droplet Loupe floats ABOVE the track bounds without vertical clipping
+            .overlay(alignment: .topLeading) {
+                if isDragging && loupe.width > 1 && loupe.height > 1 {
+                    iOSLiquidGlassLoupe(loupe: loupe, baseFrame: frame, trackPad: trackPad)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                        .transition(.scale(scale: 0.92).combined(with: .opacity))
+                }
+            }
+            .zIndex(isDragging ? 20 : 0)
+            .fixedSize()
+    }
+
+    @ViewBuilder
+    private func segmentsRow(inLoupe: Bool, tintOverride: Color? = nil) -> some View {
+        HStack(spacing: 2) {
+            ForEach(Array(options.enumerated()), id: \.element.id) { idx, opt in
+                let active = idx == activeVisualIndex
+                let fg: Color = {
+                    if let tintOverride { return tintOverride }
+                    if inLoupe {
+                        return onLightSurface ? Color(nsColor: .rgb(156, 76, 42)) : Color.blogPeachSoft
+                    }
+                    return labelColor(active: active)
+                }()
+                HStack(spacing: 5) {
+                    if let symbol = opt.symbol {
+                        Image(systemName: symbol)
+                            .font(.system(size: compact ? 11 : 12, weight: (inLoupe || active) ? .semibold : .medium))
+                    }
+                    Text(opt.label)
+                        .font(.system(size: compact ? 11.5 : 12.5, weight: (inLoupe || active) ? .semibold : .medium))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    if let count = opt.count {
+                        Text("\(count)")
+                            .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(
+                                tintOverride ?? ((active || inLoupe) ? Color.blogPeach : Color.blogMuted)
+                            )
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .foregroundStyle(fg)
+                .padding(.horizontal, compact ? 10 : 12)
+                .padding(.vertical, compact ? 4.5 : 5.5)
+                .frame(height: toolbarSized ? WorkspaceToolbarMetrics.height - 7 : nil)
+                .contentShape(Capsule())
+                .background {
+                    if !inLoupe {
                         GeometryReader { geo in
                             Color.clear.preference(
                                 key: SegmentFrameKey.self,
                                 value: [idx: geo.frame(in: .named("lb-seg-track"))]
                             )
                         }
-                    )
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(opt.label)
-                    .accessibilityAddTraits(opt.value == selection ? [.isButton, .isSelected] : .isButton)
+                    }
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(opt.label)
+                .accessibilityAction { if isEnabled { selection = opt.value } }
+                .accessibilityAddTraits(opt.value == selection ? [.isButton, .isSelected] : .isButton)
             }
         }
-        .coordinateSpace(name: "lb-seg-track")
-        .padding(3)
-        .onPreferenceChange(SegmentFrameKey.self) { next in
-            if framesChangedSignificantly(segmentFrames, next) {
-                segmentFrames = next
-            }
-        }
-        .onChange(of: selection) { _, _ in
-            pendingIndex = nil
-        }
-        .contentShape(Capsule())
-        .gesture(
-            DragGesture(minimumDistance: 0, coordinateSpace: .named("lb-seg-track"))
-                .onChanged { value in
-                    guard isEnabled, !segmentFrames.isEmpty else { return }
-                    if !didCaptureGrab {
-                        didCaptureGrab = true
-                        pendingIndex = nil
-                        if let selFrame = segmentFrames[selectedIndex],
-                           selFrame.insetBy(dx: -4, dy: -8).contains(value.startLocation) {
-                            // Pressing on the active thumb preserves the exact grab offset (zero initial jump).
-                            dragGrabOffset = value.startLocation.x - selFrame.midX
-                        } else {
-                            dragGrabOffset = 0
-                        }
-                    }
-                    let moved = abs(value.translation.width) > 1.0
-                    let pressedOther = nearestIndex(for: value.startLocation.x) != selectedIndex
-                    if moved || pressedOther || isDragging {
-                        if !isDragging {
-                            isDragging = true
-                            hoveredIndex = selectedIndex
-                        }
-                        let effectiveX = value.location.x - dragGrabOffset
-                        dragCenterX = effectiveX
-                        if let nearest = nearestIndex(for: effectiveX), nearest != hoveredIndex {
-                            hoveredIndex = nearest
-                            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
-                        }
-                    }
-                }
-                .onEnded { value in
-                    defer {
-                        didCaptureGrab = false
-                        dragGrabOffset = 0
-                    }
-                    guard isEnabled, !segmentFrames.isEmpty else { return }
-                    let effectiveX = isDragging ? (value.location.x - dragGrabOffset) : value.location.x
-                    let targetIdx = nearestIndex(for: effectiveX) ?? hoveredIndex ?? selectedIndex
-                    withAnimation(.spring(response: 0.24, dampingFraction: 0.84)) {
-                        pendingIndex = targetIdx
-                        isDragging = false
-                        dragCenterX = nil
-                        hoveredIndex = nil
-                    }
-                    // Commit selection strictly on mouse release (never while holding/dragging).
-                    if options.indices.contains(targetIdx), selection != options[targetIdx].value {
-                        selection = options[targetIdx].value
-                    } else {
-                        pendingIndex = nil
-                    }
-                }
-        )
-        .opacity(isEnabled ? 1 : 0.48)
+    }
 
-        // Single clean recessed capsule track (never nested .glassEffect inside .glassEffect).
-        trackContent
-            .background(
-                Capsule().fill(onLightSurface ? Color.black.opacity(0.065) : Color.blogSlot)
-            )
-            .overlay(
-                Capsule().strokeBorder(onLightSurface ? Color.black.opacity(0.08) : Color.blogStroke)
-            )
-            .fixedSize()
+    private func finishTracking() {
+        didCaptureGrab = false
+        dragGrabOffset = 0
+        lastDragX = nil
+        withAnimation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.82)) {
+            isDragging = false
+            dragCenterX = nil
+            dragStretch = 1
+            hoveredIndex = nil
+        }
+    }
+
+    private func iOSLiquidGlassLoupe(loupe: CGRect, baseFrame: CGRect, trackPad: CGFloat) -> some View {
+        let rowWidth = max(1, trackSize.width - 2 * trackPad)
+        let anchor = UnitPoint(x: min(0.95, max(0.05, baseFrame.midX / rowWidth)), y: 0.5)
+        let loupeOffsetX = trackPad + loupe.minX
+        let loupeOffsetY = trackPad + loupe.minY
+        let lens = Capsule().frame(width: loupe.width, height: loupe.height)
+            .offset(x: loupeOffsetX, y: loupeOffsetY)
+
+        return ZStack(alignment: .topLeading) {
+            // 1. Clear refractive Liquid Glass droplet body (macOS 26+ Glass.clear.interactive())
+            Group {
+                #if compiler(>=6.2)
+                if #available(macOS 26.0, *) {
+                    Capsule()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color.white.opacity(onLightSurface ? 0.14 : 0.03),
+                                    Color.blogPeach.opacity(onLightSurface ? 0.14 : 0.12),
+                                    Color.white.opacity(onLightSurface ? 0.26 : 0.18)
+                                ],
+                                center: .center,
+                                startRadius: 2,
+                                endRadius: max(22, loupe.width * 0.58)
+                            )
+                        )
+                        .glassEffect(.clear.interactive(), in: Capsule())
+                } else {
+                    Capsule().fill(.regularMaterial)
+                }
+                #else
+                Capsule().fill(.regularMaterial)
+                #endif
+            }
+            .frame(width: loupe.width, height: loupe.height)
+            .shadow(color: .black.opacity(0.28), radius: 8, y: 3)
+            .offset(x: loupeOffsetX, y: loupeOffsetY)
+
+            // 2. Optical magnified + chromatic-dispersed segment row clipped strictly to the droplet
+            // Anisotropic cylindrical/droplet lens magnification (y: 1.16, x: 1.045) keeps text continuous across left/right edges.
+            ZStack(alignment: .topLeading) {
+                if !reduceMotion {
+                    segmentsRow(inLoupe: true, tintOverride: Color(nsColor: .rgb(72, 232, 255)).opacity(0.50))
+                        .scaleEffect(x: 1.06, y: 1.18, anchor: anchor)
+                        .offset(x: -0.9, y: -0.45)
+                        .blur(radius: 0.3)
+
+                    segmentsRow(inLoupe: true, tintOverride: Color(nsColor: .rgb(255, 134, 66)).opacity(0.52))
+                        .scaleEffect(x: 1.03, y: 1.135, anchor: anchor)
+                        .offset(x: 0.9, y: 0.45)
+                        .blur(radius: 0.3)
+                }
+
+                segmentsRow(inLoupe: true)
+                    .scaleEffect(x: reduceMotion ? 1 : 1.045, y: reduceMotion ? 1 : 1.16, anchor: anchor)
+            }
+            .padding(trackPad)
+            .mask(alignment: .topLeading) { lens }
+
+            // 3. Prismatic chromatic dispersion rim & top/bottom curved glass caustics (matching iOS 26 image.png)
+            ZStack {
+                Capsule()
+                    .strokeBorder(
+                        AngularGradient(
+                            colors: [
+                                Color(nsColor: .rgb(255, 146, 76, 0.88)),
+                                Color(nsColor: .rgb(255, 232, 128, 0.85)),
+                                Color(nsColor: .rgb(74, 234, 255, 0.90)),
+                                Color(nsColor: .rgb(190, 152, 255, 0.72)),
+                                Color.white.opacity(0.95),
+                                Color(nsColor: .rgb(74, 234, 255, 0.88)),
+                                Color(nsColor: .rgb(255, 224, 120, 0.82)),
+                                Color(nsColor: .rgb(255, 146, 76, 0.88))
+                            ],
+                            center: .center
+                        ),
+                        lineWidth: 1.75
+                    )
+                    .blur(radius: 0.4)
+
+                Capsule()
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.92),
+                                Color.white.opacity(0.22),
+                                Color.blogPeach.opacity(0.45),
+                                Color.white.opacity(0.85)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.95
+                    )
+
+                Capsule()
+                    .inset(by: 1.5)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                Color(nsColor: .rgb(110, 238, 255, 0.55)),
+                                .clear,
+                                .clear,
+                                Color(nsColor: .rgb(255, 172, 102, 0.55))
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 1.05
+                    )
+            }
+            .frame(width: loupe.width, height: loupe.height)
+            .offset(x: loupeOffsetX, y: loupeOffsetY)
+        }
+        .frame(width: trackSize.width, height: trackSize.height, alignment: .topLeading)
+        .transaction { tx in
+            if isDragging {
+                tx.animation = nil
+            }
+        }
     }
 
     @ViewBuilder
-    private var lensView: some View {
+    private var restingPillView: some View {
         #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
-            // Pure GPU-accelerated Liquid Glass lens with no software drop-shadow re-rasterization per frame.
             Capsule()
-                .fill(onLightSurface ? Color.white.opacity(0.45) : Color.blogSlotActive.opacity(0.36))
-                .glassEffect(.regular.interactive(), in: Capsule())
+                .fill(onLightSurface ? Color.white.opacity(0.55) : Color.blogSlotActive.opacity(0.42))
+                .glassEffect(.regular.tint(Color.blogPeach.opacity(0.14)).interactive(), in: Capsule())
         } else {
             Capsule()
                 .fill(onLightSurface ? Color.white.opacity(0.88) : Color.blogSlotActive)
@@ -583,7 +943,10 @@ struct BlogSegmentedControl<Value: Hashable>: View {
     }
 
     private func nearestIndex(for x: CGFloat) -> Int? {
-        segmentFrames.min(by: { abs($0.value.midX - x) < abs($1.value.midX - x) })?.key
+        if let hit = segmentFrames.first(where: { x >= $0.value.minX && x < $0.value.maxX }) {
+            return hit.key
+        }
+        return segmentFrames.min(by: { abs($0.value.midX - x) < abs($1.value.midX - x) })?.key
     }
 
     private func framesChangedSignificantly(_ lhs: [Int: CGRect], _ rhs: [Int: CGRect]) -> Bool {
@@ -693,6 +1056,7 @@ struct SearchField: View {
     @Binding var text: String
     var focused: FocusState<Bool>.Binding
     var shortcutHint: String? = "⌘F"
+    var toolbarSized = false
     var onSubmit: () -> Void = {}
     var body: some View {
         let isFocused = focused.wrappedValue
@@ -718,7 +1082,8 @@ struct SearchField: View {
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.vertical, toolbarSized ? 0 : 6)
+        .frame(height: toolbarSized ? WorkspaceToolbarMetrics.height : nil)
         .blogGlassControl(
             capsule: true,
             interactive: true,
