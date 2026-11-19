@@ -154,7 +154,6 @@ struct ConnectionSettingsView: View {
         .frame(width: 720, height: 760)
         .foregroundStyle(Color.blogText)
         .background(Color.blogBackground)
-        .tint(.blogPeach)
         .interactiveDismissDisabled(dirty || status.busy)
         .task {
             guard !loadedSettings else { return }
@@ -214,6 +213,7 @@ struct ConnectionSettingsView: View {
                 values[key] = current[key]
                 baseline[key] = current[key]
             }
+            posts.checkID = UUID(); posts.nextCheck = .distantPast
             posts.resetBuffer(); posts.articles = []; posts.staged = []; posts.loaded = false; posts.clearMessages()
             posts.refresh(autoSelectFirst: true)
         }
@@ -226,10 +226,11 @@ struct ConnectionSettingsView: View {
             return
         }
         let frozen = values
-        app.confirm("保存这些服务连接？", "站点与仓库偏好写入本地配置，三个服务令牌分别存入 Keychain。不会自动发布内容或验证网络连接。", button: "保存连接") {
-            status.run("save", "settings.save", frozen, success: "连接已保存。请到各板块显式刷新 / 验证；尚未声明任何服务在线。") { _ in
+        app.confirm("保存这些服务连接？", "令牌保存在此 Mac 的钥匙串中。保存后会在后台读取站点状态。", button: "保存连接") {
+            status.run("save", "settings.save", frozen, success: "连接已保存，正在更新站点状态。") { _ in
                 baseline = frozen
                 app.resetConnectionViews()
+                app.refreshIfNeeded()
             }
         }
     }

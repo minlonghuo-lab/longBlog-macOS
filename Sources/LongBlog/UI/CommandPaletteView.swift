@@ -207,18 +207,8 @@ struct CommandPaletteOverlay: View {
                 .background(Color.blogField.opacity(0.5))
             }
             .frame(width: 580)
-            .background {
-                ZStack {
-                    VisualEffectBackground(material: .popover, blendingMode: .withinWindow)
-                    Color.blogSidebar.opacity(0.94)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(Color.blogPeach.opacity(0.35), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.45), radius: 32, y: 16)
+            .modifier(CommandPaletteSurfaceModifier())
+            .shadow(color: .black.opacity(0.42), radius: 34, y: 16)
             .padding(.top, 84)
         }
         .onAppear {
@@ -302,5 +292,44 @@ private struct PaletteRow: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct CommandPaletteSurfaceModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            content
+                .background(Color.blogBackground.opacity(0.28), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        } else {
+            content
+                .background {
+                    ZStack {
+                        VisualEffectBackground(material: .popover, blendingMode: .withinWindow)
+                        Color.blogSidebar.opacity(0.94)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.blogPeach.opacity(0.35), lineWidth: 1)
+                )
+        }
+        #else
+        content
+            .background {
+                ZStack {
+                    VisualEffectBackground(material: .popover, blendingMode: .withinWindow)
+                    Color.blogSidebar.opacity(0.94)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.blogPeach.opacity(0.35), lineWidth: 1)
+            )
+        #endif
     }
 }

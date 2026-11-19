@@ -99,7 +99,7 @@ func formattedISOBuildTime(_ raw: String?) -> String {
     }
     static func label(_ key: String) -> String {
         ["list": "读取列表", "load": "读取", "save": "保存", "new": "新建", "stage": "暂存", "sync": "同步", "commit": "提交",
-         "revert": "撤销", "attachment": "导入附件", "dashboard": "读取状态", "sessions": "读取会话", "messages": "读取消息",
+         "revert": "撤销", "delete": "删除", "attachment": "导入附件", "dashboard": "读取状态", "sessions": "读取会话", "messages": "读取消息",
          "read": "标记已读", "contact": "联系信息", "reply": "发送回复", "identity": "验证账户", "update": "更新",
          "upload": "上传附件", "download": "下载附件", "preview": "生成预览", "folder": "绑定目录",
          "settings": "读取连接"][key] ?? key
@@ -174,6 +174,24 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
                 MainActor.assumeIsolated { AppModel.shared.inbox.syncFromCore() }
             }
         )
+        commandObservers.append(NotificationCenter.default.addObserver(forName: Notification.Name("LBWorkspaceFilesDidChange"), object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { AppModel.shared.posts.workspaceChanged() }
+        })
+        commandObservers.append(NotificationCenter.default.addObserver(forName: Notification.Name("LBSiteDataDidChange"), object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { AppModel.shared.dashboard.receiveProgress() }
+        })
+        commandObservers.append(
+            NotificationCenter.default.addObserver(forName: Notification.Name("LBMemosDidChange"), object: nil, queue: .main) { note in
+                guard note.userInfo?["reset"] as? Bool == true else { return }
+                MainActor.assumeIsolated { AppModel.shared.memos.clearAccount() }
+            }
+        )
+        commandObservers.append(
+            NotificationCenter.default.addObserver(forName: Notification.Name("LBMemosCacheDidChange"), object: nil, queue: .main) { note in
+                let info = note.userInfo as? [String: Any] ?? [:]
+                MainActor.assumeIsolated { AppModel.shared.memos.receiveCacheProgress(info) }
+            }
+        )
         commandObservers.append(
             NotificationCenter.default.addObserver(forName: Notification.Name("LBOpenSessionRequest"), object: nil, queue: .main) { note in
                 let sid = note.userInfo?["sessionId"] as? String
@@ -190,13 +208,16 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     }
 
     func resetConnectionViews() {
+        posts.checkID = UUID(); posts.nextCheck = .distantPast
+        configuration.checkID = UUID(); configuration.nextCheck = .distantPast
+        memos.checkID = UUID(); memos.nextCheck = .distantPast; memos.more = false
         posts.resetBuffer(); posts.articles = []; posts.staged = []; posts.loaded = false; posts.clearMessages()
         inbox.setActiveSession(nil)
         inbox.pendingSelectID = nil
         inbox.sessions = []; inbox.messages = []; inbox.selected = nil; inbox.contact = nil; inbox.reply = ""; inbox.failedReply = nil; inbox.loaded = false; inbox.unread = 0; inbox.lastSync = nil; inbox.clearMessages()
         memos.assign(nil); memos.items = []; memos.editing = false; memos.loaded = false; memos.username = ""; memos.clearMessages()
         configuration.baseline = ""; configuration.sha = ""; configuration.values = [:]; configuration.baselineValues = [:]; configuration.sections = []; configuration.search = ""; configuration.clearMessages()
-        dashboard.data = [:]; dashboard.refreshed = nil; dashboard.clearMessages()
+        dashboard.invalidate(); dashboard.clearMessages()
     }
 
     /// Parent AppDelegate may use this for applicationShouldTerminate(.terminateLater).
@@ -284,19 +305,30 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     // Editors are retained across section switches. Selection changes are separately confirmed.
     func refreshIfNeeded() {
         // Also pre-load local posts count silently once so sidebar badge & ⌘K search work immediately.
-        if !posts.loaded && !posts.busy { posts.refresh(autoSelectFirst: section == .posts) }
+        if !posts.loaded && !posts.busy { posts.openLocal() }
         switch section {
-        case .dashboard: if dashboard.data.isEmpty { dashboard.refresh() }
+        case .dashboard: dashboard.openLocal()
         case .posts:
             if posts.loaded, posts.draft.id.isEmpty, !posts.editing, let first = posts.filtered.first {
                 posts.select(first)
             }
         case .inbox: if !inbox.loaded { inbox.refresh() }
-        case .memos: if !memos.loaded { memos.refresh() }
-        case .configuration: if configuration.baseline.isEmpty { configuration.refresh() }
+        case .memos: memos.openLocal()
+        case .configuration: configuration.openLocal()
         }
     }
 
+    func checkVisibleSection() {
+        guard NSApp.isActive, !showingSettings, !showingReview, confirmation == nil,
+              !ProcessInfo.processInfo.arguments.contains("--smoke-test") else { return }
+        switch section {
+        case .dashboard: if !dashboard.data.isEmpty { dashboard.verifyIfNeeded() }
+        case .posts: posts.checkForChanges()
+        case .configuration: configuration.openLocal()
+        case .memos: memos.openLocal()
+        default: break
+        }
+    }
     func newArticle() { navigate(.posts); posts.newArticle() }
     func newMemo() { navigate(.memos); memos.newMemo() }
     func save() {
@@ -323,13 +355,18 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     func toggleFocusMode() {
         if section != .posts { navigate(.posts) }
         guard !posts.draft.id.isEmpty else { return }
-        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
-            if !focusMode {
+        if !focusMode {
+            if !posts.editing {
+                // Mount editor first so native NavigationSplitView sidebar glide starts with zero frame drop.
                 posts.editing = true
-                focusMode = true
+                DispatchQueue.main.async {
+                    self.focusMode = true
+                }
             } else {
-                focusMode = false
+                focusMode = true
             }
+        } else {
+            focusMode = false
         }
     }
     func openCommandPalette() {
@@ -416,7 +453,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case "settings": showingSettings = true
         case "commandPalette": toggleCommandPalette()
         case "toggleFocus": toggleFocusMode()
-        case "toggleSidebar": withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) { sidebarCollapsed.toggle() }
+        case "toggleSidebar": sidebarCollapsed.toggle()
         case "nav.dashboard": navigate(.dashboard)
         case "nav.inbox": navigate(.inbox)
         case "nav.posts": navigate(.posts)
@@ -433,13 +470,50 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
 @MainActor final class DashboardModel: ServiceModel {
     @Published var data: [String: Any] = [:]
     @Published var refreshed: Date?
-    func refresh() {
-        run("dashboard", "site.refresh") {
-            self.data = $0
-            self.refreshed = Date()
-            if ($0["inboxConfigured"] as? NSNumber)?.boolValue == true {
-                LBUIRequest("inbox.polling", ["active": true]) { _, _ in }
-            }
+    private var verificationID = UUID()
+    private var verifying = false
+    private var nextVerification = Date.distantPast
+    func invalidate() {
+        verificationID = UUID(); verifying = false; nextVerification = .distantPast
+        data = [:]; refreshed = nil
+    }
+    func openLocal() {
+        if !data.isEmpty { verifyIfNeeded(); return }
+        guard !busy else { return }
+        run("dashboard", "site.cached") { result in
+            self.data = result
+            self.refreshed = result["checkedAt"] as? Date
+            LBUIRequest("inbox.pollIfUnlocked", [:]) { _, _ in }
+            self.verifyIfNeeded()
+        }
+    }
+    private func mergeSnapshot(_ result: [String: Any]) {
+        for (key, value) in result {
+            if value is NSNull { continue }
+            if let map = value as? NSDictionary, map.count == 0, key != "errors" { continue }
+            data[key] = value
+        }
+    }
+    func receiveProgress() {
+        guard verifying else { return }
+        let id = verificationID
+        LBUIRequest("site.live", [:]) { result, _ in
+            guard self.verifying, self.verificationID == id, let result else { return }
+            self.mergeSnapshot(result)
+        }
+    }
+    func verifyIfNeeded() {
+        guard Date() >= nextVerification else { return }
+        refresh(manual: false)
+    }
+    func refresh(manual: Bool = true) {
+        guard !verifying, !ProcessInfo.processInfo.arguments.contains("--smoke-test") else { return }
+        nextVerification = Date().addingTimeInterval(60)
+        let id = UUID(); verificationID = id; verifying = true
+        LBUIRequest("site.refresh", ["manual": manual]) { result, _ in
+            guard self.verificationID == id else { return }
+            self.verifying = false
+            if let result { self.mergeSnapshot(result); self.refreshed = Date() }
         }
     }
 }
@@ -448,6 +522,7 @@ struct PostDraft: Equatable {
     var id = "", title = "", markdown = "", summary = "", tags = "", published = false, bodyFormat = "markdown"
     var createdAt: Double = 0, updatedAt: Double = 0, publishedAt: Double = 0
     var directory: URL?
+    var sourceRevision = ""
     init() {}
     init(_ row: [String: Any]) {
         id = row["id"] as? String ?? ""
@@ -459,6 +534,7 @@ struct PostDraft: Equatable {
         createdAt = (row["createdAt"] as? NSNumber)?.doubleValue ?? 0
         updatedAt = (row["updatedAt"] as? NSNumber)?.doubleValue ?? 0
         publishedAt = (row["publishedAt"] as? NSNumber)?.doubleValue ?? 0
+        sourceRevision = row["sourceRevision"] as? String ?? ""
         directory = row["directory"] as? URL
         bodyFormat = row["bodyFormat"] as? String ?? "markdown"
     }
@@ -473,7 +549,7 @@ struct PostDraft: Equatable {
         lhs.directory == rhs.directory
     }
     var arguments: [String: Any] {
-        ["id": id, "title": title, "markdown": markdown, "summary": summary, "publish": published,
+        ["id": id, "sourceRevision": sourceRevision, "title": title, "markdown": markdown, "summary": summary, "publish": published,
          "tags": tags.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }]
     }
 }
@@ -492,6 +568,22 @@ struct PostDraft: Equatable {
     @Published var loaded = false
     @Published var frozenReview: [[String: Any]] = []
     @Published var commitMessage = "Update articles from longBlog macOS"
+    var nextCheck = Date.distantPast
+    var checkID = UUID()
+    func checkForChanges() {
+        guard loaded, !editing, !busy, !isDirty, Date() >= nextCheck else { return }
+        nextCheck = Date().addingTimeInterval(60)
+        let id = UUID(); checkID = id
+        LBUIRequest("posts.check", [:]) { result, _ in
+            let app = AppModel.shared
+            guard self.checkID == id, app.section == .posts, !app.connectionLocked, !app.showingSettings,
+                  !self.editing, !self.isDirty, result?["changed"] as? Bool == true else { return }
+            self.run("sync", "posts.sync") { _ in
+                self.refresh(autoSelectFirst: self.draft.id.isEmpty)
+                if !self.editing && !self.isDirty { self.reloadCurrent() }
+            }
+        }
+    }
     private var saved = PostDraft()
     var isDirty: Bool { draft != saved }
     var stagedIDs: Set<String> { Set(staged.compactMap { $0["id"] as? String }) }
@@ -508,11 +600,34 @@ struct PostDraft: Equatable {
                 || tags.localizedCaseInsensitiveContains(search)
         }
     }
+    private var awaitingWorkspaceRefresh = false
+    func workspaceChanged() {
+        guard !awaitingWorkspaceRefresh else { return }
+        awaitingWorkspaceRefresh = true
+        whenIdle {
+            self.awaitingWorkspaceRefresh = false
+            self.refresh()
+            self.whenIdle {
+                guard !self.isDirty, !self.editing, !self.draft.id.isEmpty else { return }
+                if self.articles.contains(where: { $0.id == self.draft.id }) { self.reloadCurrent() }
+                else { self.resetBuffer() }
+            }
+        }
+    }
     func resetBuffer() { draft = PostDraft(); saved = draft; editing = false; frozenReview = [] }
     func reloadCurrent() {
         guard !draft.id.isEmpty, !isDirty else { return }
         let id = draft.id
         run("load", "posts.load", ["id": id]) { self.draft = PostDraft($0); self.saved = self.draft }
+    }
+    func openLocal() {
+        run("list", "posts.cached") { result in
+            if let snapshot = result["rows"] as? [[String: Any]] {
+                self.articles = rows(snapshot); self.folder = result["folder"] as? String ?? "Posts"
+                if AppModel.shared.section == .posts, self.draft.id.isEmpty, !self.editing, let first = self.filtered.first { self.select(first) }
+            }
+            self.refresh(autoSelectFirst: AppModel.shared.section == .posts)
+        }
     }
     func refresh(autoSelectFirst: Bool = false) {
         run("list", "posts.list") {
@@ -520,8 +635,11 @@ struct PostDraft: Equatable {
             self.staged = $0["staged"] as? [[String: Any]] ?? []
             self.folder = $0["folder"] as? String ?? "Posts"
             self.loaded = true
-            if autoSelectFirst, self.draft.id.isEmpty, !self.editing, let first = self.filtered.first {
+            if (autoSelectFirst || AppModel.shared.section == .posts), self.draft.id.isEmpty, !self.editing, let first = self.filtered.first {
                 self.select(first)
+            }
+            self.whenIdle {
+                if AppModel.shared.section == .posts { AppModel.shared.checkVisibleSection() }
             }
         }
     }
@@ -570,6 +688,33 @@ struct PostDraft: Equatable {
             }
         }
         if isDirty { save(after: apply) } else { apply() }
+    }
+    func delete(_ row: DataRow) {
+        guard !busy else { return }
+        if row.flag("publish") {
+            let targetID = row.id
+            AppModel.shared.confirm("已发布文章不能直接删除", "请先暂存下架，提交到 main 并确认线上撤下后再删除草稿。", button: "暂存下架") {
+                let apply = {
+                    self.run("stage", "posts.stage", ["id": targetID, "publish": false], success: "已暂存下架；请审阅提交到 main 变为草稿后再删除。") { _ in
+                        self.refresh()
+                        if self.draft.id == targetID { self.reloadCurrent() }
+                    }
+                }
+                if self.draft.id == targetID && self.isDirty { self.save(after: apply) } else { apply() }
+            }
+            return
+        }
+        if stagedIDs.contains(row.id) {
+            AppModel.shared.confirm("文章仍在暂存队列", "请先在暂存队列撤销或提交该文章，完成线上状态变更后再删除。", button: "知道了") {}
+            return
+        }
+        let targetID = row.id
+        AppModel.shared.confirm("永久删除草稿？", "将删除「\(row.text("title").isEmpty ? "未命名文章" : row.text("title"))」及其文章目录与附件。此操作不可撤销。", button: "删除草稿", destructive: true) {
+            self.run("delete", "posts.delete", ["id": targetID], success: "草稿已删除。") { _ in
+                if self.draft.id == targetID { self.resetBuffer() }
+                self.refresh(autoSelectFirst: self.draft.id.isEmpty)
+            }
+        }
     }
     func sync() {
         guard !busy else { return }
@@ -700,18 +845,28 @@ struct PostDraft: Equatable {
         }
     }
 
+    private var cachedSessionsByArchive: [Bool: [DataRow]] = [:]
+    private var cachedLoadedByArchive: [Bool: Bool] = [:]
+
     func refresh(more: Bool = false) {
         var args: [String: Any] = [:]
         if more && !archiveCursor.isEmpty { args["cursor"] = archiveCursor }
-        run("sessions", archived ? "inbox.archives" : "inbox.list", args) { result in
-            self.sessions = more ? self.sessions + rows(result["rows"]) : rows(result["rows"])
+        let targetArchive = archived
+        run("sessions", targetArchive ? "inbox.archives" : "inbox.list", args) { result in
+            let nextRows = more ? self.sessions + rows(result["rows"]) : rows(result["rows"])
+            self.cachedSessionsByArchive[targetArchive] = nextRows
+            self.cachedLoadedByArchive[targetArchive] = true
+            guard self.archived == targetArchive else { return }
+            withAnimation(.easeInOut(duration: 0.16)) {
+                self.sessions = nextRows
+                self.loaded = true
+            }
             self.archiveCursor = result["cursor"] as? String ?? ""
             if !self.archived {
                 self.unread = (result["unread"] as? NSNumber)?.intValue ?? 0
                 if let syncDate = result["lastSync"] as? Date { self.lastSync = syncDate }
                 LBUIRequest("inbox.polling", ["active": true]) { _, _ in }
             }
-            self.loaded = true
             if let wanted = self.pendingSelectID {
                 self.pendingSelectID = nil
                 if let hit = self.sessions.first(where: { $0.id == wanted }) { self.select(hit) }
@@ -723,13 +878,26 @@ struct PostDraft: Equatable {
     }
 
     func setArchived(_ value: Bool, selecting sessionID: String? = nil) {
-        guard value != archived, !busy else { return }
+        guard value != archived else { return }
         let action = {
             self.pendingSelectID = sessionID
             self.setActiveSession(nil)
-            self.archived = value; self.selected = nil; self.messages = []; self.reply = ""
-            self.failedReply = nil; self.contact = nil; self.selectionRevision = UUID()
-            self.sessions = []; self.refresh()
+            withAnimation(.easeInOut(duration: 0.18)) {
+                self.archived = value
+                self.selected = nil
+                self.messages = []
+                self.reply = ""
+                self.failedReply = nil
+                self.contact = nil
+                self.selectionRevision = UUID()
+                self.sessions = self.cachedSessionsByArchive[value] ?? []
+                self.loaded = self.cachedLoadedByArchive[value] ?? false
+            }
+            // Defer remote refresh slightly so the segmented slider spring & crossfade finish at 120fps.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
+                guard self.archived == value, !self.busy else { return }
+                self.refresh()
+            }
         }
         if !reply.isEmpty { AppModel.shared.confirm("放弃未发送的回复？", "切换会话列表会清除回复输入。", button: "放弃回复", destructive: true, action: action) } else { action() }
     }
@@ -799,6 +967,13 @@ struct PostDraft: Equatable {
     @Published var loaded = false
     @Published var search = ""
     @Published var username = ""
+    @Published var cacheTotal = 0
+    @Published var cacheCompleted = 0
+    @Published var cacheFailed = 0
+    @Published var cacheRunning = false
+    @Published var cacheVersion = 0
+    @Published var localResourceURLs: [String: URL] = [:]
+    @Published var loadingResourceKeys = Set<String>()
     private var savedContent = "", savedVisibility = "PRIVATE"
     private var savedResourceIDs: [Int] = []
     var resourceIDs: [Int] { resources.compactMap { ($0["id"] as? NSNumber)?.intValue } }
@@ -819,23 +994,161 @@ struct PostDraft: Equatable {
     }
     func newMemo() { discardThen { self.assign(nil); self.archived = false } }
     func select(_ row: DataRow) { guard row.id != selectedID else { return }; discardThen { self.assign(row.data) } }
-    func setArchived(_ value: Bool) { guard archived != value else { return }; discardThen { self.archived = value; self.assign(nil); self.editing = false; self.refresh() } }
-    func refresh() {
-        guard !busy else { return }
-        run("identity", "memos.validate") { user in
-            self.username = user["nickname"] as? String ?? user["username"] as? String ?? ""
-            self.load()
-        }
-    }
-    func load(more: Bool = false) {
-        let offset = more ? items.count : 0
-        run("list", "memos.list", ["state": archived ? "ARCHIVED" : "NORMAL", "text": search, "offset": offset]) { result in
-            self.items = more ? self.items + rows(result["rows"]) : rows(result["rows"])
-            self.more = (result["more"] as? NSNumber)?.boolValue ?? false; self.loaded = true
-            if !self.editing, self.selectedID == nil, let first = self.items.first {
+    private var cachedRowsByArchive: [Bool: [DataRow]] = [:]
+    private var cachedLoadedByArchive: [Bool: Bool] = [:]
+
+    func setArchived(_ value: Bool) {
+        guard archived != value else { return }
+        discardThen {
+            let targetState = value ? "ARCHIVED" : "NORMAL"
+            let id = UUID()
+            self.checkID = id
+            self.nextCheck = .distantPast
+            withAnimation(.easeInOut(duration: 0.18)) {
+                self.archived = value
+                if let cached = self.cachedRowsByArchive[value] {
+                    self.items = cached
+                    self.loaded = self.cachedLoadedByArchive[value] ?? true
+                    self.more = false
+                }
+            }
+            if let first = self.cachedRowsByArchive[value]?.first {
                 self.assign(first.data)
+            } else if self.cachedRowsByArchive[value] != nil {
+                self.original = nil; self.selectedID = nil; self.content = ""; self.resources = []
+                self.savedContent = ""; self.savedResourceIDs = []; self.editing = false
+            }
+            // Load disk cache & remote check after slider release animation starts so main thread stays 120fps.
+            LBUIRequest("memos.cached", ["state": targetState]) { result, _ in
+                guard self.checkID == id, self.archived == value else { return }
+                if let list = result?["rows"] as? [[String: Any]] {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        self.display(list)
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    guard self.checkID == id, self.archived == value else { return }
+                    self.check(manual: false, id: id)
+                }
             }
         }
+    }
+    var nextCheck = Date.distantPast
+    var checkID = UUID()
+    private var state: String { archived ? "ARCHIVED" : "NORMAL" }
+    private var attachmentAccount = UUID()
+    func clearAccount() {
+        attachmentAccount = UUID(); previewAttachment = nil
+        localResourceURLs = [:]; loadingResourceKeys = []
+        cachedRowsByArchive = [:]; cachedLoadedByArchive = [:]
+        cacheTotal = 0; cacheCompleted = 0; cacheFailed = 0; cacheRunning = false; cacheVersion &+= 1
+        checkID = UUID(); nextCheck = .distantPast; items = []; loaded = false
+        username = ""; assign(nil); editing = false; more = false
+    }
+    func receiveCacheProgress(_ info: [String: Any]) {
+        cacheTotal = (info["total"] as? NSNumber)?.intValue ?? cacheTotal
+        cacheCompleted = (info["completed"] as? NSNumber)?.intValue ?? cacheCompleted
+        cacheFailed = (info["failed"] as? NSNumber)?.intValue ?? cacheFailed
+        cacheRunning = (info["running"] as? NSNumber)?.boolValue ?? false
+        cacheVersion &+= 1
+        // Refresh cached URLs for visible resources whenever background downloads complete.
+        for res in resources { resolveCachedURL(for: res, downloadIfMissing: false) }
+        for item in items.prefix(30) {
+            if let list = item.data["resourceList"] as? [[String: Any]] {
+                for res in list.prefix(3) { resolveCachedURL(for: res, downloadIfMissing: false) }
+            }
+        }
+    }
+    func resourceKey(_ resource: [String: Any]) -> String {
+        let id = (resource["id"] as? NSNumber)?.stringValue ?? (resource["id"] as? String) ?? ""
+        let updated = (resource["updatedTs"] as? NSNumber)?.stringValue ?? ""
+        let size = (resource["size"] as? NSNumber)?.stringValue ?? ""
+        let name = (resource["filename"] as? String) ?? (resource["name"] as? String) ?? ""
+        return "\(id)|\(updated)|\(size)|\(name)"
+    }
+    func resolveCachedURL(for resource: [String: Any], downloadIfMissing: Bool = false) {
+        let key = resourceKey(resource)
+        guard !key.isEmpty else { return }
+        if let existing = localResourceURLs[key], FileManager.default.fileExists(atPath: existing.path) { return }
+        let account = attachmentAccount
+        LBUIRequest("memos.cachedResource", ["resource": resource]) { [weak self] result, _ in
+            guard let self, self.attachmentAccount == account else { return }
+            if let url = result?["url"] as? URL, url.isFileURL {
+                self.localResourceURLs[key] = url
+                self.loadingResourceKeys.remove(key)
+                return
+            }
+            guard downloadIfMissing, !self.loadingResourceKeys.contains(key) else { return }
+            self.loadingResourceKeys.insert(key)
+            LBUIRequest("memos.download", ["resource": resource]) { [weak self] dl, _ in
+                guard let self, self.attachmentAccount == account else { return }
+                self.loadingResourceKeys.remove(key)
+                if let url = dl?["url"] as? URL, url.isFileURL {
+                    self.localResourceURLs[key] = url
+                }
+            }
+        }
+    }
+    private func display(_ list: [[String: Any]]) {
+        let parsed = rows(list)
+        cachedRowsByArchive[archived] = parsed
+        cachedLoadedByArchive[archived] = true
+        let changed = !(items.map(\.data) as NSArray).isEqual(to: list)
+        if changed { items = parsed }
+        loaded = true; more = false
+        guard !isDirty, !busy else { return }
+        if let selectedID, changed {
+            if let fresh = items.first(where: { $0.id == selectedID }) {
+                self.assign(fresh.data)
+            } else { assign(nil); editing = false }
+        }
+        if !editing, let first = items.first { assign(first.data) }
+    }
+    func openLocal() {
+        guard !busy, Date() >= nextCheck else { return }
+        nextCheck = Date().addingTimeInterval(60)
+        let id = UUID(); checkID = id
+        let otherArchive = !archived
+        let otherState = otherArchive ? "ARCHIVED" : "NORMAL"
+        if cachedRowsByArchive[otherArchive] == nil {
+            LBUIRequest("memos.cached", ["state": otherState]) { [weak self] res, _ in
+                guard let self, let list = res?["rows"] as? [[String: Any]] else { return }
+                self.cachedRowsByArchive[otherArchive] = rows(list)
+                self.cachedLoadedByArchive[otherArchive] = true
+            }
+        }
+        if loaded { check(manual: false, id: id); return }
+        LBUIRequest("memos.cached", ["state": state]) { result, _ in
+            guard self.checkID == id else { return }
+            if let list = result?["rows"] as? [[String: Any]] { self.display(list) }
+            self.check(manual: false, id: id)
+        }
+    }
+    private func check(manual: Bool, id: UUID) {
+        LBUIRequest("memos.check", ["state": state, "manual": manual]) { result, error in
+            guard self.checkID == id else { return }
+            if let error {
+                if (error as NSError).code == 401 {
+                    self.items = []; self.loaded = false; self.assign(nil); self.editing = false; self.username = ""
+                }
+                if manual || !self.loaded { self.errors["list"] = error.localizedDescription }
+                return
+            }
+            self.errors["list"] = nil
+            self.username = result?["username"] as? String ?? ""
+            if let list = result?["rows"] as? [[String: Any]] { self.display(list) }
+            LBUIRequest("memos.prefetch", [:]) { info, _ in
+                if let info { self.receiveCacheProgress(info) }
+            }
+        }
+    }
+    func refresh() {
+        guard !busy else { return }
+        nextCheck = Date().addingTimeInterval(60)
+        let id = UUID(); checkID = id; check(manual: true, id: id)
+    }
+    func load(more: Bool = false) {
+        let id = UUID(); checkID = id; check(manual: false, id: id)
     }
     func save() {
         guard editing, !busy else { return }
@@ -848,11 +1161,15 @@ struct PostDraft: Equatable {
             self.run("save", "memos.save", args, success: "说说已保存到 Memos。") { self.assign($0); self.load() }
         }
     }
-    func update(_ fields: [String: Any], title: String) {
-        guard !busy, let original = original else { return }
-        guard !isDirty else { errors["update"] = "请先保存或放弃正文修改，再执行此操作。"; return }
+    func update(_ fields: [String: Any], title: String, target: [String: Any]? = nil) {
+        guard !busy, let targetRow = target ?? original else { return }
+        let targetID = (targetRow["id"] as? NSNumber)?.stringValue
+        if targetID == selectedID && isDirty { errors["update"] = "请先保存或放弃正文修改，再执行此操作。"; return }
         AppModel.shared.confirm(title, "仅修改当前说说；不会自动重试结果未知的写入。", button: title) {
-            self.run("update", "memos.update", ["original": original, "fields": fields], success: "说说状态已更新。") { self.assign($0); self.load() }
+            self.run("update", "memos.update", ["original": targetRow, "fields": fields], success: "说说状态已更新。") { updated in
+                if self.selectedID == targetID { self.assign(updated) }
+                self.load()
+            }
         }
     }
     func importFiles(_ urls: [URL]) {
@@ -882,12 +1199,79 @@ struct PostDraft: Equatable {
             self.run("upload", "memos.upload", ["url": url], success: "附件已上传；请保存说说以建立关联。") { self.resources.append($0) }
         }
     }
-    func openResource(_ resource: [String: Any]) {
-        run("download", "memos.download", ["resource": resource]) { if let url = $0["url"] as? URL { NSWorkspace.shared.open(url) } }
+    @Published var previewAttachment: MemoPreviewAttachment?
+    func openResource(_ resource: [String: Any], in list: [[String: Any]] = []) {
+        let key = resourceKey(resource)
+        let name = (resource["filename"] as? String) ?? (resource["name"] as? String) ?? "附件"
+        let mime = (resource["type"] as? String ?? "").lowercased()
+        let siblings: [MemoPreviewItem] = list.compactMap { item in
+            let k = resourceKey(item)
+            guard let url = localResourceURLs[k], url.isFileURL else { return nil }
+            let n = (item["filename"] as? String) ?? (item["name"] as? String) ?? "附件"
+            let m = (item["type"] as? String ?? "").lowercased()
+            return MemoPreviewItem(key: k, url: url, name: n, mime: m)
+        }
+        if let local = localResourceURLs[key], FileManager.default.fileExists(atPath: local.path) {
+            let current = MemoPreviewItem(key: key, url: local, name: name, mime: mime)
+            let gallery = siblings.contains(where: { $0.key == key }) ? siblings : [current]
+            previewAttachment = MemoPreviewAttachment(item: current, gallery: gallery)
+            return
+        }
+        let account = attachmentAccount
+        loadingResourceKeys.insert(key)
+        LBUIRequest("memos.download", ["resource": resource]) { [weak self] result, error in
+            guard let self, self.attachmentAccount == account else { return }
+            self.loadingResourceKeys.remove(key)
+            if let error { self.errors["download"] = error.localizedDescription; return }
+            guard let url = result?["url"] as? URL, url.isFileURL else { return }
+            self.localResourceURLs[key] = url
+            let current = MemoPreviewItem(key: key, url: url, name: name, mime: mime)
+            var gallery = siblings
+            if !gallery.contains(where: { $0.key == key }) { gallery.append(current) }
+            self.previewAttachment = MemoPreviewAttachment(item: current, gallery: gallery)
+        }
+    }
+    func deleteArchived(_ target: [String: Any]? = nil) {
+        guard !busy, let targetRow = target ?? original else { return }
+        let targetID = (targetRow["id"] as? NSNumber)?.stringValue
+        if targetID == selectedID && isDirty { errors["delete"] = "请先保存或放弃正文修改，再执行此操作。"; return }
+        guard targetRow["rowStatus"] as? String == "ARCHIVED" else { return }
+        let title = String((targetRow["content"] as? String ?? "这条说说").prefix(40))
+        AppModel.shared.confirm("永久删除已归档说说？", "将永久删除「\(title)」及其服务端记录。此操作不可撤销。", button: "永久删除", destructive: true) {
+            self.run("delete", "memos.delete", ["original": targetRow], success: "说说已永久删除。") { _ in
+                if self.selectedID == targetID { self.assign(nil); self.editing = false }
+                self.load()
+            }
+        }
     }
 }
 
 @MainActor final class ConfigurationModel: ServiceModel {
+    var nextCheck = Date.distantPast
+    var checkID = UUID()
+    func openLocal() {
+        guard !busy, !isDirty, !showingPreview, Date() >= nextCheck else { return }
+        nextCheck = Date().addingTimeInterval(60)
+        let id = UUID(); checkID = id
+        func check() {
+            LBUIRequest("env.load", ["sha": sha, "silent": true]) { result, error in
+                guard id == self.checkID, !self.isDirty, !self.busy, !self.showingPreview else { return }
+                if let error {
+                    if self.baseline.isEmpty { self.errors["load"] = error.localizedDescription }
+                    return
+                }
+                self.errors["load"] = nil
+                if let result, result["unchanged"] == nil { self.apply(result) }
+            }
+        }
+        if !baseline.isEmpty { check(); return }
+        LBUIRequest("env.cached", [:]) { result, _ in
+            guard id == self.checkID, !self.isDirty, !self.busy else { return }
+            if let result, result["sha"] != nil { self.apply(result) }
+            check()
+        }
+    }
+    private var localProjection = false
     @Published var baseline = ""
     @Published var sha = ""
     @Published var repository = ""
@@ -908,6 +1292,7 @@ struct PostDraft: Equatable {
         if let base = baselineValues[key] { values[key] = base }
     }
     func apply(_ result: [String: Any]) {
+        localProjection = result["localProjection"] as? Bool ?? false
         baseline = result["text"] as? String ?? ""; sha = result["sha"] as? String ?? ""; repository = result["repo"] as? String ?? ""
         values = result["values"] as? [String: String] ?? [:]; baselineValues = values
         sections = (result["sections"] as? [[String: Any]] ?? []).enumerated().map { index, value in
@@ -917,7 +1302,12 @@ struct PostDraft: Equatable {
     }
     func refresh() {
         guard !busy else { return }
-        let action = { self.run("load", "env.load") { self.apply($0) } }
+        let action = {
+            self.checkID = UUID()
+            self.run("load", "env.load", ["sha": self.isDirty ? "" : self.sha]) { result in
+                if result["unchanged"] == nil { self.apply(result) }
+            }
+        }
         if isDirty { AppModel.shared.confirm("重新载入并放弃配置修改？", "本地表单修改尚未提交到 main。", button: "放弃并载入", destructive: true, action: action) } else { action() }
     }
     func revert() {
@@ -926,10 +1316,13 @@ struct PostDraft: Equatable {
             self.values = self.baselineValues; self.preview = ""
         }
     }
-    func arguments() -> [String: Any] { ["text": baseline, "values": values, "sha": sha, "repo": repository] }
+    func arguments() -> [String: Any] {
+        ["text": baseline, "values": values, "sha": sha, "repo": repository, "localProjection": localProjection, "baselineValues": baselineValues]
+    }
     func review() {
         guard isDirty, !busy else { return }
         let args = arguments()
+        checkID = UUID()
         run("preview", "env.preview", args) { result in self.preview = result["text"] as? String ?? ""; self.showingPreview = true }
     }
     func commit() {

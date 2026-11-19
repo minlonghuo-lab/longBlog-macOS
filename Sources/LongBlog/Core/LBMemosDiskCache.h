@@ -5,9 +5,14 @@
 @interface LBMemosDiskCache : NSObject
 @property (nonatomic, readonly) NSNumber *userID;
 @property (nonatomic, readonly) NSDictionary<NSString *, NSArray *> *snapshots;
+@property (nonatomic, readonly) NSDictionary<NSString *, NSString *> *validators;
+- (void)replaceState:(NSString *)state rows:(NSArray *)rows validator:(NSString *)etag done:(void (^)(NSError *error))done;
 + (NSString *)fingerprint:(NSDictionary *)resource;
 // Private protected binding uses SHA256(base + SHA256(exact credential)); no
 // plaintext credential is persisted. Loading a binding NEVER validates writes.
+// Read-only profile selected by the last successful authentication on this Mac.
++ (void)loadOfflineBindingForBase:(NSString *)base done:(void (^)(NSNumber *uid))done;
++ (void)clearOfflineBinding;
 + (void)loadBindingForBase:(NSString *)base token:(NSString *)token done:(void (^)(NSNumber *uid))done;
 + (void)saveBindingForBase:(NSString *)base token:(NSString *)token userID:(NSNumber *)uid done:(void (^)(NSError *error))done;
 + (void)revokeBindingForBase:(NSString *)base token:(NSString *)token;

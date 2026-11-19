@@ -19,22 +19,22 @@ struct PostsWorkspace: View {
             }
             HSplitView {
                 if showPostList {
-                    PostListColumn(model: model, compact: app.focusMode)
-                        .frame(
-                            minWidth: app.focusMode ? 235 : 270,
-                            idealWidth: app.focusMode ? 265 : 320,
-                            maxWidth: app.focusMode ? 310 : 380
-                        )
+                    PostListColumn(model: model, compact: false)
+                        .frame(minWidth: 235, idealWidth: 280, maxWidth: 350)
                 }
                 Group {
                     if model.draft.id.isEmpty {
-                        EmptyWorkspace(
-                            symbol: "doc.richtext",
-                            title: "选择或新建一篇文章",
-                            detail: "本地 Markdown 编辑 → 暂存发布或下架 → 审阅 → 单个原子提交到 main。\n支持三栏实时预览（⌘⌥P）与专注工作台（⌘⇧F）。",
-                            actionTitle: "新建文章  ⌘N",
-                            action: { app.newArticle() }
-                        )
+                        if !model.loaded || model.running.contains("load") || !model.filtered.isEmpty {
+                            Color.clear
+                        } else {
+                            EmptyWorkspace(
+                                symbol: "doc.richtext",
+                                title: "选择或新建一篇文章",
+                                detail: "本地 Markdown 编辑 → 暂存发布或下架 → 审阅 → 单个原子提交到 main。\n支持三栏实时预览（⌘⌥P）与专注工作台（⌘⇧F）。",
+                                actionTitle: "新建文章  ⌘N",
+                                action: { app.newArticle() }
+                            )
+                        }
                     } else {
                         PostDetailView(model: model, collapseListInStudio: $collapseListInStudio)
                     }
@@ -57,24 +57,26 @@ struct PostsWorkspace: View {
                 .font(.system(size: 12.5))
                 .foregroundStyle(Color.blogSecondary)
             Spacer()
-            Button("撤销") {
-                model.frozenReview = model.staged
-                model.revert()
-            }
-            .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-            .disabled(model.busy || model.isDirty)
-
-            Button {
-                model.review()
-            } label: {
-                HStack(spacing: 5) {
-                    Text("审阅并提交")
-                    ShortcutCap(text: "⌘⇧P", onPrimary: true)
+            BlogGlassGroup(spacing: 8) {
+                Button("撤销") {
+                    model.frozenReview = model.staged
+                    model.revert()
                 }
+                .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                .disabled(model.busy || model.isDirty)
+
+                Button {
+                    model.review()
+                } label: {
+                    HStack(spacing: 5) {
+                        Text("审阅并提交")
+                        ShortcutCap(text: "⌘⇧P", onPrimary: true)
+                    }
+                }
+                .buttonStyle(BlogPrimaryButtonStyle(compact: true))
+                .disabled(model.busy)
+                .help("审阅待提交文章  ⌘⇧P")
             }
-            .buttonStyle(BlogPrimaryButtonStyle(compact: true))
-            .disabled(model.busy)
-            .help("审阅待提交文章  ⌘⇧P")
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 10)
@@ -167,7 +169,9 @@ private struct PostListColumn: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
         }
-        .onChange(of: app.searchRequested) { searchFocused = true }
+        .onChange(of: app.searchRequested) {
+            if app.section == .posts { searchFocused = true }
+        }
     }
 
     @ViewBuilder private func contextMenu(_ row: DataRow) -> some View {
@@ -178,6 +182,13 @@ private struct PostListColumn: View {
             if row.id == model.draft.id { model.editing = true }
         }
         Divider()
+        if row.flag("publish") {
+            Button("删除文章（需先下架）") {}
+                .disabled(true)
+            Button("暂存下架") { model.delete(row) }
+        } else {
+            Button("删除草稿…", role: .destructive) { model.delete(row) }
+        }
         if let path = row.data["filePath"] as? String, !path.isEmpty {
             Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
             Button("拷贝文件路径") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(path, forType: .string) }
@@ -308,22 +319,26 @@ private struct PostDetailView: View {
     @AppStorage("lb.editor.syncScroll") private var syncScroll = true
     @AppStorage("lb.editor.previewTheme") private var previewTheme = "paper"
 
+    private var mutatingBusy: Bool {
+        !model.running.subtracting(["list", "load"]).isEmpty
+    }
+
     private var layout: Binding<EditorLayout> {
         Binding(
             get: { !model.editing ? .read : (model.splitPreview ? .split : .edit) },
             set: { value in
-                withAnimation(.easeOut(duration: 0.16)) {
-                    switch value {
-                    case .read:
-                        model.editing = false
-                        if app.focusMode { app.focusMode = false }
-                    case .edit:
-                        model.editing = true
-                        model.splitPreview = false
-                    case .split:
-                        model.editing = true
-                        model.splitPreview = true
+                switch value {
+                case .read:
+                    model.editing = false
+                    if app.focusMode {
+                        withAnimation(.easeInOut(duration: 0.22)) { app.focusMode = false }
                     }
+                case .edit:
+                    model.editing = true
+                    model.splitPreview = false
+                case .split:
+                    model.editing = true
+                    model.splitPreview = true
                 }
             }
         )
@@ -335,7 +350,6 @@ private struct PostDetailView: View {
             HairlineDivider()
             if model.editing { editorArea } else { reader }
         }
-        .disabled(model.busy)
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data], allowsMultipleSelection: true) { result in
             switch result {
             case .success(let urls): model.importFiles(urls) { session.controller.insert($0) }
@@ -362,6 +376,16 @@ private struct PostDetailView: View {
     // MARK: - Detail Header
 
     private var header: some View {
+        ViewThatFits(in: .horizontal) {
+            headerRow(showBadges: true, compactActions: false)
+            headerRow(showBadges: false, compactActions: false)
+            headerRow(showBadges: false, compactActions: true)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 9)
+    }
+
+    private func headerRow(showBadges: Bool, compactActions: Bool) -> some View {
         HStack(spacing: 10) {
             if app.focusMode {
                 Button {
@@ -372,6 +396,7 @@ private struct PostDetailView: View {
                     Image(systemName: collapseListInStudio ? "sidebar.left" : "rectangle.leadinghalf.inset.filled")
                 }
                 .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                .fixedSize()
                 .help(collapseListInStudio ? "显示文章列表（三栏工作台）" : "隐藏文章列表（纯净双栏）")
             }
 
@@ -382,75 +407,158 @@ private struct PostDetailView: View {
             )
             .help("阅读 ⌘⌥R · 编辑 ⌘⌥E · 分栏预览 ⌘⌥P")
 
-            StatusBadge(
-                text: model.draft.published ? "已发布" : "草稿",
-                color: model.draft.published ? .blogGreen : .blogMuted
-            )
-            if model.stagedIDs.contains(model.draft.id) {
-                StatusBadge(text: "待提交", color: .blogPeach)
+            if showBadges {
+                StatusBadge(
+                    text: model.draft.published ? "已发布" : "草稿",
+                    color: model.draft.published ? .blogGreen : .blogMuted
+                )
+                .fixedSize()
+                if model.stagedIDs.contains(model.draft.id) {
+                    StatusBadge(text: "待提交", color: .blogPeach)
+                        .fixedSize()
+                }
             }
             if model.isDirty {
                 StatusBadge(text: "未保存", color: .blogAmber, dot: true)
+                    .fixedSize()
             }
 
             Spacer(minLength: 8)
 
-            if !app.focusMode {
-                Button {
-                    app.toggleFocusMode()
-                } label: {
-                    Label("专注", systemImage: "arrow.up.left.and.arrow.down.right")
+            BlogGlassGroup(spacing: 8) {
+                if app.focusMode {
+                    Button {
+                        app.focusMode = false
+                        app.sidebarCollapsed = false
+                    } label: {
+                        if compactActions {
+                            Image(systemName: "arrow.down.right.and.arrow.up.left")
+                        } else {
+                            Label("退出专注", systemImage: "arrow.down.right.and.arrow.up.left")
+                        }
+                    }
+                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                    .fixedSize()
+                    .help("退出专注模式  ⌘⇧F")
+                } else {
+                    Button {
+                        app.toggleFocusMode()
+                    } label: {
+                        if compactActions {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        } else {
+                            Label("专注", systemImage: "arrow.up.left.and.arrow.down.right")
+                        }
+                    }
+                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                    .fixedSize()
+                    .help("进入专注写作工作台  ⌘⇧F")
                 }
-                .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                .help("进入专注写作工作台  ⌘⇧F")
-            }
 
-            Button {
-                aiSnapshot = model.draft
-            } label: {
-                Label("AI", systemImage: "sparkles")
-            }
-            .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-            .disabled(model.draft.bodyFormat == "html" || model.busy)
-            .help("AI 写作辅助：摘要、润色、续写")
-
-            if model.editing && !app.focusMode {
                 Button {
-                    model.save()
+                    aiSnapshot = model.draft
                 } label: {
-                    HStack(spacing: 4) {
-                        Text("保存")
-                        ShortcutCap(text: "⌘S", onPrimary: model.isDirty)
+                    if compactActions {
+                        Image(systemName: "sparkles")
+                    } else {
+                        Label("AI", systemImage: "sparkles")
                     }
                 }
-                .buttonStyle(model.isDirty ? AnyButtonStyle(BlogPrimaryButtonStyle(compact: true)) : AnyButtonStyle(BlogSecondaryButtonStyle(compact: true)))
-                .disabled(!model.isDirty || model.busy)
-                .help("保存到本地  ⌘S")
-            }
+                .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                .fixedSize()
+                .disabled(model.draft.bodyFormat == "html" || mutatingBusy)
+                .help("AI 写作辅助：摘要、润色、续写")
 
-            Menu {
-                Button("暂存发布 / 更新到队列") { model.stage(true) }
-                Button("暂存下架") { model.stage(false) }.disabled(!model.draft.published)
-                Divider()
-                Button("在 Finder 中显示") { revealInFinder() }.disabled(model.draft.directory == nil)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "tray.and.arrow.up")
-                    Text("暂存")
+                if model.editing && !app.focusMode {
+                    if model.isDirty {
+                        Button("保存") {
+                            model.save()
+                        }
+                        .buttonStyle(BlogPrimaryButtonStyle(compact: true))
+                        .fixedSize()
+                        .disabled(mutatingBusy)
+                        .help("保存到本地  ⌘S")
+                    } else {
+                        Button("保存") {
+                            model.save()
+                        }
+                        .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                        .fixedSize()
+                        .disabled(true)
+                        .help("保存到本地  ⌘S")
+                    }
                 }
-                .font(.system(size: 12, weight: .medium))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.blogSurface, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Color.blogStroke))
+
+                Group {
+                    #if compiler(>=6.2)
+                    if #available(macOS 26.0, *) {
+                        Menu {
+                            stagingMenuItems
+                        } label: {
+                            Label("暂存", systemImage: "tray.and.arrow.up")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.glass)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.small)
+                    } else {
+                        Menu {
+                            stagingMenuItems
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "tray.and.arrow.up")
+                                Text("暂存")
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(Color.blogText.opacity(0.92))
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 5.5)
+                            .blogGlassControl(capsule: true, interactive: true)
+                        }
+                        .menuStyle(.borderlessButton)
+                    }
+                    #else
+                    Menu {
+                        stagingMenuItems
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "tray.and.arrow.up")
+                            Text("暂存")
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.blogText.opacity(0.92))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5.5)
+                        .blogGlassControl(capsule: true, interactive: true)
+                    }
+                    .menuStyle(.borderlessButton)
+                    #endif
+                }
+                .fixedSize()
+                .disabled(mutatingBusy)
+                .accessibilityLabel("暂存文章发布或下架")
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(model.busy)
-            .accessibilityLabel("暂存文章发布或下架")
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 9)
+    }
+
+    @ViewBuilder
+    private var stagingMenuItems: some View {
+        Button("暂存发布 / 更新到队列") { model.stage(true) }
+        Button("暂存下架") { model.stage(false) }.disabled(!model.draft.published)
+        Divider()
+        Button("在 Finder 中显示") { revealInFinder() }.disabled(model.draft.directory == nil)
+        Divider()
+        if model.draft.published {
+            Button("删除文章（需先下架）") {}
+                .disabled(true)
+        } else if model.stagedIDs.contains(model.draft.id) {
+            Button("删除草稿（暂存队列待处理）") {}
+                .disabled(true)
+        } else {
+            Button("删除草稿…", role: .destructive) {
+                model.delete(DataRow(data: ["id": model.draft.id, "title": model.draft.title, "publish": model.draft.published]))
+            }
+        }
     }
 
     // MARK: - Studio Editor Area
@@ -525,6 +633,10 @@ private struct PostDetailView: View {
             onImportFiles: { urls in model.importFiles(urls) { session.controller.insert($0) } }
         )
         .background(Color.blogEditor)
+        .clipped()
+        .transaction { transaction in
+            transaction.animation = nil
+        }
     }
 
     private var titleAndMeta: some View {
@@ -725,37 +837,48 @@ private struct PostDetailView: View {
                 bodyFormat: model.draft.bodyFormat == "html" ? .html : .markdown,
                 paperTheme: previewTheme
             )
+            .background(readerBackdrop(for: previewTheme))
+            .transaction { $0.animation = nil }
 
             HairlineDivider()
 
             // Bottom Action Bar matching chosen-posts.png ("编辑 ⌘E" · "分栏写作" · "暂存发布 / 暂存下架")
             HStack(spacing: 10) {
-                Button {
-                    model.editing = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Text("编辑")
-                        ShortcutCap(text: "⌘E", onPrimary: true)
+                BlogGlassGroup(spacing: 10) {
+                    Button {
+                        model.editing = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("编辑")
+                            ShortcutCap(text: "⌘E", onPrimary: true)
+                        }
                     }
-                }
-                .buttonStyle(BlogPrimaryButtonStyle())
+                    .buttonStyle(BlogPrimaryButtonStyle())
 
-                Button {
-                    model.splitPreview = true
-                    model.editing = true
-                } label: {
-                    Label("分栏写作", systemImage: "rectangle.split.2x1")
-                }
-                .buttonStyle(BlogSecondaryButtonStyle())
+                    Button {
+                        model.splitPreview = true
+                        model.editing = true
+                    } label: {
+                        Label("分栏写作", systemImage: "rectangle.split.2x1")
+                    }
+                    .buttonStyle(BlogSecondaryButtonStyle())
 
-                if model.draft.published {
-                    Button("暂存下架") { model.stage(false) }
-                        .buttonStyle(BlogSecondaryButtonStyle())
-                        .disabled(model.busy)
-                } else {
-                    Button("暂存发布") { model.stage(true) }
-                        .buttonStyle(BlogSecondaryButtonStyle())
-                        .disabled(model.busy)
+                    if model.draft.published {
+                        Button("暂存下架") { model.stage(false) }
+                            .buttonStyle(BlogSecondaryButtonStyle())
+                            .disabled(mutatingBusy)
+                    } else {
+                        Button("暂存发布") { model.stage(true) }
+                            .buttonStyle(BlogSecondaryButtonStyle())
+                            .disabled(mutatingBusy)
+                        if !model.stagedIDs.contains(model.draft.id) {
+                            Button("删除草稿") {
+                                model.delete(DataRow(data: ["id": model.draft.id, "title": model.draft.title, "publish": false]))
+                            }
+                            .buttonStyle(BlogSecondaryButtonStyle(destructive: true))
+                            .disabled(mutatingBusy)
+                        }
+                    }
                 }
 
                 Spacer()
@@ -771,6 +894,14 @@ private struct PostDetailView: View {
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 12)
+        }
+    }
+
+    private func readerBackdrop(for theme: String) -> Color {
+        switch theme {
+        case "paper": return Color(nsColor: .rgb(246, 239, 230))
+        case "dark": return Color(nsColor: .rgb(37, 30, 26))
+        default: return Color(nsColor: .lb(light: .rgb(246, 239, 230), dark: .rgb(37, 30, 26)))
         }
     }
 
@@ -823,6 +954,8 @@ private struct LivePreview: View {
                 scrollFraction: sync ? session.fraction : nil,
                 paperTheme: theme
             )
+            .background(isLightPaper ? Color(nsColor: .rgb(246, 239, 230)) : Color(nsColor: .lb(light: .rgb(246, 239, 230), dark: .rgb(37, 30, 26))))
+            .transaction { $0.animation = nil }
         }
     }
 }
@@ -831,54 +964,18 @@ private struct PreviewThemeSwitch: View {
     @Binding var theme: String
     var onLightSurface = false
 
-    private let items: [(id: String, label: String)] = [
-        ("paper", "暖纸"),
-        ("dark", "深色"),
-        ("auto", "自动")
-    ]
-
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(items, id: \.id) { item in
-                let active = theme == item.id
-                Button {
-                    theme = item.id
-                } label: {
-                    Text(item.label)
-                        .font(.system(size: 10.5, weight: active ? .semibold : .medium))
-                        .foregroundStyle(
-                            onLightSurface
-                                ? (active ? Color(nsColor: .rgb(47, 38, 31)) : Color(nsColor: .rgb(122, 107, 96)))
-                                : (active ? Color.blogText : Color.blogMuted)
-                        )
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2.5)
-                        .background(
-                            active
-                                ? (onLightSurface ? Color.white.opacity(0.85) : Color.blogSlotActive)
-                                : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(2)
-        .background(
-            onLightSurface ? Color.black.opacity(0.06) : Color.blogSlot,
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+        BlogSegmentedControl(
+            options: [
+                SegmentedOption(value: "paper", label: "暖纸"),
+                SegmentedOption(value: "dark", label: "深色"),
+                SegmentedOption(value: "auto", label: "自动")
+            ],
+            selection: $theme,
+            compact: true,
+            onLightSurface: onLightSurface
         )
-        .help("切换预览纸张底色（暖纸 / 深色 / 跟随外观）")
-    }
-}
-
-/// Type-erased ButtonStyle helper for clean conditional primary/secondary styling.
-struct AnyButtonStyle: ButtonStyle {
-    private let _makeBody: (Configuration) -> AnyView
-    init<S: ButtonStyle>(_ style: S) {
-        _makeBody = { AnyView(style.makeBody(configuration: $0)) }
-    }
-    func makeBody(configuration: Configuration) -> some View {
-        _makeBody(configuration)
+        .scaleEffect(0.88, anchor: .trailing)
+        .help("切换预览纸张底色（支持按住拖动切换：暖纸 / 深色 / 跟随外观）")
     }
 }

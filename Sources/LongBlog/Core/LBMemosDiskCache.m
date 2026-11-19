@@ -41,6 +41,7 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
 @interface LBMemosDiskCache ()
 @property (nonatomic, readwrite) NSNumber *userID;
 @property (nonatomic, readwrite) NSDictionary<NSString *, NSArray *> *snapshots;
+@property (nonatomic, readwrite) NSDictionary<NSString *, NSString *> *validators;
 @property NSURL *root;
 @property NSURL *files;
 @property NSURL *metadata;
@@ -88,7 +89,22 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
   return [directory URLByAppendingPathComponent:[key stringByAppendingString:@".json"]];
 }
 + (void)loadBindingForBase:(NSString *)base token:(NSString *)token done:(void (^)(NSNumber *))done {
-  NSURL *url = [self bindingURLForBase:base token:token];
+  [self readBindingURL:[self bindingURLForBase:base token:token] done:done];
+}
++ (void)clearOfflineBinding {
+  [NSUserDefaults.standardUserDefaults removeObjectForKey:@"LBMemosOfflineProfile"];
+}
++ (void)loadOfflineBindingForBase:(NSString *)base done:(void (^)(NSNumber *))done {
+  NSDictionary *profile = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"LBMemosOfflineProfile"];
+  NSString *name = profile[@"binding"];
+  if (![base isEqual:profile[@"base"]] || ![name isKindOfClass:NSString.class] ||
+      [name rangeOfString:@"^[0-9a-f]{64}\\.json$" options:NSRegularExpressionSearch].location == NSNotFound) {
+    done(nil); return;
+  }
+  NSURL *parent = [LBApplicationSupportURL() URLByAppendingPathComponent:@"MemosCacheBindings-v1"];
+  [self readBindingURL:[parent URLByAppendingPathComponent:name] done:done];
+}
++ (void)readBindingURL:(NSURL *)url done:(void (^)(NSNumber *))done {
   dispatch_async([self bindingQueue], ^{
     NSDictionary *attrs = url ? [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:NULL] : nil;
     id raw = nil;
@@ -102,6 +118,7 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
 }
 + (void)saveBindingForBase:(NSString *)base token:(NSString *)token userID:(NSNumber *)uid done:(void (^)(NSError *))done {
   NSURL *url = [self bindingURLForBase:base token:token];
+  if (url) [NSUserDefaults.standardUserDefaults setObject:@{@"base":base, @"binding":url.lastPathComponent} forKey:@"LBMemosOfflineProfile"];
   dispatch_async([self bindingQueue], ^{
     NSURL *directory = url.URLByDeletingLastPathComponent; NSFileManager *fm = NSFileManager.defaultManager;
     NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version":@1, @"userID":uid} options:0 error:NULL];
@@ -111,6 +128,7 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
   });
 }
 + (void)revokeBindingForBase:(NSString *)base token:(NSString *)token {
+  [self clearOfflineBinding];
   NSURL *url = [self bindingURLForBase:base token:token]; if (!url) return;
   dispatch_async([self bindingQueue], ^{ [NSFileManager.defaultManager removeItemAtURL:url error:NULL]; });
 }
@@ -131,7 +149,7 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
 }
 - (instancetype)initWithBase:(NSString *)base userID:(NSNumber *)uid {
   if ((self = [super init])) {
-    _userID = uid; _snapshots = @{}; _available = [NSMutableSet set];
+    _userID = uid; _snapshots = @{}; _validators = @{}; _available = [NSMutableSet set];
     _io = [self.class queueForNamespace:LBCHash([NSString stringWithFormat:@"%@\n%@", base, uid])];
     NSURL *support = LBApplicationSupportURL();
     NSURL *parent = [support URLByAppendingPathComponent:@"MemosCache-v1" isDirectory:YES];
@@ -158,7 +176,7 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
 }
 - (void)load:(void (^)(NSError *))done {
   dispatch_async(self.io, ^{
-    NSError *error = [self prepare]; NSDictionary *snapshot = @{}; NSMutableSet *available = [NSMutableSet set];
+    NSError *error = [self prepare]; NSDictionary *snapshot = @{}, *validators = @{}; NSMutableSet *available = [NSMutableSet set];
     NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:self.metadata.path error:NULL];
     if (!error && attrs) {
       if (![attrs[NSFileType] isEqual:NSFileTypeRegular] || [attrs[NSFileSize] unsignedLongLongValue] > LBCMetadataCap) error = LBCErr(@"本地缓存索引无效，请重新同步。");
@@ -171,7 +189,16 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
             id rows = raw[@"states"][state];
             if (rows) { if (!LBCRows(rows, self.userID, state)) { error = LBCErr(@"本地缓存账户或格式校验失败，请重新同步。"); break; } valid[state] = rows; }
           }
-          if (!error) snapshot = valid;
+          if (!error) {
+            snapshot = valid;
+            NSMutableDictionary *tags = [NSMutableDictionary dictionary];
+            for (NSString *state in valid) {
+              id tag = [raw[@"validators"] isKindOfClass:NSDictionary.class] ? raw[@"validators"][state] : nil;
+              if ([tag isKindOfClass:NSString.class] && [tag length] <= 1024 &&
+                  [tag rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound) tags[state] = tag;
+            }
+            validators = tags;
+          }
         } else error = LBCErr(@"本地缓存索引不可读，请重新同步。");
       }
     }
@@ -181,7 +208,7 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
       NSURL *invalid = [self.files URLByAppendingPathComponent:[key stringByAppendingString:@".invalid"]];
       if (![NSFileManager.defaultManager fileExistsAtPath:invalid.path] && [a[NSFileType] isEqual:NSFileTypeRegular] && [a[NSFileSize] isEqual:r[@"size"]] && [a[NSFileSize] unsignedLongLongValue] <= LBCFileCap) [available addObject:key];
     }
-    dispatch_async(dispatch_get_main_queue(), ^{ NSError *finalError = [self lifecycleError] ?: error; if (!finalError) { self.snapshots = snapshot; self.available = available; } done(finalError); });
+    dispatch_async(dispatch_get_main_queue(), ^{ NSError *finalError = [self lifecycleError] ?: error; if (!finalError) { self.snapshots = snapshot; self.validators = validators; self.available = available; } done(finalError); });
   });
 }
 - (void)commit:(NSDictionary *)states prune:(BOOL)prune done:(void (^)(NSError *))done {
@@ -189,11 +216,12 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
   // durable writes ordered on io. A disk error remains visible to the caller.
   if (self.invalidated) { done([self lifecycleError]); return; }
   BOOL writeNeeded = self.metadataDirty || ![self.snapshots isEqual:states];
+  NSDictionary *validators = self.validators;
   self.snapshots = states; self.metadataDirty = YES; NSUInteger revision = ++self.revision;
   dispatch_async(self.io, ^{
     NSError *error = [self prepare];
     if (!error && writeNeeded) {
-      NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version":@1, @"userID":self.userID, @"states":states} options:0 error:NULL];
+      NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version":@1, @"userID":self.userID, @"states":states, @"validators":validators} options:0 error:NULL];
       if (self.invalidated) error = [self lifecycleError];
       if (!error && (!data || data.length > LBCMetadataCap || ![data writeToURL:self.metadata options:NSDataWritingAtomic error:NULL] || !LBCProtect(self.metadata))) error = LBCErr(@"正文缓存保存失败，请检查存储空间后重新同步。");
     }
@@ -214,7 +242,15 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
 }
 - (void)replaceState:(NSString *)state rows:(NSArray *)rows done:(void (^)(NSError *))done {
   if (self.invalidated) { done([self lifecycleError]); return; }
+  [self replaceState:state rows:rows validator:nil done:done];
+}
+- (void)replaceState:(NSString *)state rows:(NSArray *)rows validator:(NSString *)etag done:(void (^)(NSError *))done {
+  if (self.invalidated) { done([self lifecycleError]); return; }
   if (!LBCRows(rows, self.userID, state)) { done(LBCErr(@"缓存快照账户或格式无效。")); return; }
+  NSMutableDictionary *tags = [self.validators mutableCopy];
+  if (etag.length && etag.length <= 1024 && [etag rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location == NSNotFound) tags[state] = etag;
+  else [tags removeObjectForKey:state];
+  if (![tags isEqual:self.validators]) { self.validators = tags; self.metadataDirty = YES; }
   NSMutableDictionary *states = [self.snapshots mutableCopy]; states[state] = [rows copy];
   if (!self.metadataDirty && [self.snapshots isEqual:states]) { done(nil); return; }
   [self commit:states prune:NO done:done];
@@ -225,11 +261,15 @@ static BOOL LBCRows(id rows, NSNumber *uid, NSString *state) {
   NSMutableSet *ids = [NSMutableSet setWithArray:[normal valueForKey:@"id"]];
   [ids intersectSet:[NSSet setWithArray:[archived valueForKey:@"id"]]];
   if (ids.count) { done(LBCErr(@"同步期间记录状态发生变化，请重新同步。")); return; }
+  if (![normal isEqual:self.snapshots[@"NORMAL"]] || ![archived isEqual:self.snapshots[@"ARCHIVED"]]) {
+    self.validators = @{}; self.metadataDirty = YES;
+  }
   [self commit:@{@"NORMAL":[normal copy], @"ARCHIVED":[archived copy]} prune:YES done:done];
 }
 - (void)patchMemo:(NSDictionary *)memo deletedID:(NSNumber *)identifier done:(void (^)(NSError *))done {
   if (self.invalidated) { done([self lifecycleError]); return; }
   NSMutableDictionary *states = [NSMutableDictionary dictionary];
+  self.validators = @{}; self.metadataDirty = YES;
   NSNumber *target = identifier ?: memo[@"id"];
   for (NSString *state in @[@"NORMAL", @"ARCHIVED"]) {
     NSArray *old = self.snapshots[state]; if (!old) continue;

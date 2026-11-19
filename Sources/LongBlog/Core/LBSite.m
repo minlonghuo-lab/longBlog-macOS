@@ -2,6 +2,8 @@
 #import "LBMdStore.h"
 #import "LBPlatform.h"
 #import <Security/Security.h>
+#import <LocalAuthentication/LocalAuthentication.h>
+#import <pthread.h>
 #import <CommonCrypto/CommonDigest.h>
 
 static NSDictionary *dict(id v) { return [v isKindOfClass:NSDictionary.class] ? v : nil; }
@@ -36,28 +38,59 @@ static BOOL LBSmokeTestMode(void) {
   dispatch_once(&once, ^{ smoke = [NSProcessInfo.processInfo.arguments containsObject:@"--smoke-test"]; });
   return smoke;
 }
+// File-based login keychains and the data-protection keychain use different
+// interaction controls. Keep the legacy process-wide change inside one call.
+// Serialize the temporary process-wide setting across all credential operations.
+static OSStatus LBQuietKeychainAccess(OSStatus (^operation)(void)) {
+  static pthread_mutex_t access = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&access);
+  Boolean previous = false;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  OSStatus status = SecKeychainGetUserInteractionAllowed(&previous);
+  if (status == errSecSuccess && previous) status = SecKeychainSetUserInteractionAllowed(false);
+  if (status == errSecSuccess) {
+    status = operation();
+    if (previous) SecKeychainSetUserInteractionAllowed(true);
+  }
+#pragma clang diagnostic pop
+  pthread_mutex_unlock(&access); return status;
+}
+static NSString *LBSlotKey(NSString *account) { return [@"LBCredentialSlot." stringByAppendingString:account]; }
 + (NSDictionary *)query:(NSString *)account {
   return @{ (__bridge id)kSecClass : (__bridge id)kSecClassGenericPassword,
             (__bridge id)kSecAttrService : LBAppNamespace(),
             (__bridge id)kSecAttrAccount : account };
 }
-+ (NSString *)get:(NSString *)account {
++ (NSString *)get:(NSString *)account { return [self getWithoutPrompt:account]; }
++ (NSString *)getWithoutPrompt:(NSString *)account {
   if (LBSmokeTestMode()) return nil;
   LBKeychainEntry *entry = LBEntryForAccount(account);
   @synchronized (entry) {
     id cached = entry.cachedValue;
     if (cached) return cached == NSNull.null ? nil : cached;
-    NSMutableDictionary *q = [[self query:account] mutableCopy];
+    NSString *slot = [NSUserDefaults.standardUserDefaults stringForKey:LBSlotKey(account)] ?: account;
+    if (!slot.length) return nil;
+    NSMutableDictionary *q = [[self query:slot] mutableCopy];
     q[(__bridge id)kSecReturnData] = @YES;
     q[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
-    CFTypeRef out = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)q, &out);
+    LAContext *context = [LAContext new]; context.interactionNotAllowed = YES;
+    q[(__bridge id)kSecUseAuthenticationContext] = context;
+    __block CFTypeRef out = NULL;
+    OSStatus status = LBQuietKeychainAccess(^{ return SecItemCopyMatching((__bridge CFDictionaryRef)q, &out); });
     NSString *value = nil;
     if (status == errSecSuccess && out) value = [[NSString alloc] initWithData:(__bridge_transfer NSData *)out encoding:NSUTF8StringEncoding];
     else if (out) CFRelease(out);
-    // Denied/cancelled prompts are remembered too: asking again would freeze the UI again.
-    entry.cachedValue = value ?: NSNull.null;
+    // A silent read of a locked item must not poison a later user-initiated unlock.
+    if (value || status == errSecItemNotFound) entry.cachedValue = value ?: NSNull.null;
     return value;
+  }
+}
++ (void)detach:(NSString *)account {
+  LBKeychainEntry *entry = LBEntryForAccount(account);
+  @synchronized (entry) {
+    [NSUserDefaults.standardUserDefaults setObject:@"" forKey:LBSlotKey(account)];
+    entry.cachedValue = NSNull.null;
   }
 }
 + (void)set:(NSString *)value account:(NSString *)account {
@@ -66,25 +99,25 @@ static BOOL LBSmokeTestMode(void) {
   LBKeychainEntry *entry = LBEntryForAccount(account);
   @synchronized (entry) {
     NSString *previous = [self get:account];
-    if ([previous ?: @"" isEqualToString:t ?: @""]) return;
-    if (!t.length) {
-      OSStatus status = SecItemDelete((__bridge CFDictionaryRef)[self query:account]);
-      entry.cachedValue = (status == errSecSuccess || status == errSecItemNotFound) ? NSNull.null : (previous ?: NSNull.null);
-      return;
+    if (previous && [previous isEqualToString:t ?: @""]) return;
+    if (!previous && !t.length) return;
+    NSUserDefaults *prefs = NSUserDefaults.standardUserDefaults;
+    NSString *oldSlot = [prefs stringForKey:LBSlotKey(account)] ?: account;
+    NSString *slot = @"";
+    if (t.length) {
+      // A replaced build may lack access to the old item. Save the value
+      // explicitly entered in Settings as a new app-owned item, then switch.
+      slot = [NSString stringWithFormat:@"%@.%@", account, NSUUID.UUID.UUIDString];
+      NSMutableDictionary *q = [[self query:slot] mutableCopy];
+      q[(__bridge id)kSecValueData] = [t dataUsingEncoding:NSUTF8StringEncoding];
+      q[(__bridge id)kSecAttrSynchronizable] = @NO;
+      if (LBQuietKeychainAccess(^{ return SecItemAdd((__bridge CFDictionaryRef)q,NULL); }) != errSecSuccess) return;
     }
-    NSData *data = [t dataUsingEncoding:NSUTF8StringEncoding];
-    if (!data) { entry.cachedValue = previous ?: NSNull.null; return; }
-    NSDictionary *update = @{ (__bridge id)kSecValueData : data };
-    OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)[self query:account], (__bridge CFDictionaryRef)update);
-    if (status == errSecSuccess) { entry.cachedValue = [t copy]; return; }
-    if (status != errSecItemNotFound) { entry.cachedValue = previous ?: NSNull.null; return; }
-    NSMutableDictionary *q = [[self query:account] mutableCopy];
-    q[(__bridge id)kSecValueData] = data;
-    // macOS login Keychain access follows its unlock state and item ACL.
-    // Do not set iOS-only data-protection accessibility attributes.
-    q[(__bridge id)kSecAttrSynchronizable] = @NO;
-    status = SecItemAdd((__bridge CFDictionaryRef)q, NULL);
-    entry.cachedValue = (status == errSecSuccess) ? [t copy] : NSNull.null;
+    [prefs setObject:slot forKey:LBSlotKey(account)];
+    entry.cachedValue = t.length ? [t copy] : NSNull.null;
+    if (previous.length && oldSlot.length) {
+      LBQuietKeychainAccess(^{ return SecItemDelete((__bridge CFDictionaryRef)[self query:oldSlot]); });
+    }
   }
 }
 @end
@@ -176,7 +209,10 @@ static NSError *httpErr(NSInteger code, NSString *msg) {
   if (!url || ![url.scheme isEqualToString:@"https"]) return finish(nil, 0, httpErr(400, @"地址必须是 HTTPS"));
   NSMutableURLRequest *r = [NSMutableURLRequest requestWithURL:url];
   r.HTTPMethod = method;
-  r.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+  BOOL publicSnapshot = [method isEqual:@"GET"] && !headers.count &&
+      [url.path isEqual:@"/api/shuoshuo-feed/snapshot.json"];
+  r.cachePolicy = publicSnapshot ? NSURLRequestUseProtocolCachePolicy : NSURLRequestReloadIgnoringLocalCacheData;
+  if (publicSnapshot) [r setValue:@"no-cache" forHTTPHeaderField:@"Cache-Control"];
   [headers enumerateKeysAndObjectsUsingBlock:^(id k, id v, BOOL *stop) { [r setValue:v forHTTPHeaderField:k]; }];
   if (body) {
     r.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
@@ -465,6 +501,30 @@ static BOOL GHReserveRetry(void) {
     done(text, sha, e ?: (!text ? httpErr(500, @"文件不是 UTF-8 文本") : nil));
   }];
 }
+- (void)checkEnvSinceBlob:(NSString *)known done:(void (^)(NSString *, NSString *, NSError *))done {
+  if (!self.frozenRepository) {
+    [[[LBGitHub alloc] initWithRepository:self.repository] checkEnvSinceBlob:known done:done]; return;
+  }
+  [self headCommit:^(NSDictionary *head, NSError *error) {
+    if (error) return done(nil, nil, error);
+    [self request:@"GET" suffix:[@"/git/trees/" stringByAppendingString:head[@"treeSHA"]] body:nil done:^(NSDictionary *tree, NSError *e) {
+      if (e) return done(nil, nil, e);
+      for (NSDictionary *entry in tree[@"tree"]) {
+        if (![str(entry[@"path"]) isEqual:@".env"]) continue;
+        NSString *sha = str(entry[@"sha"]);
+        if (![str(entry[@"mode"]) isEqual:@"100644"] || ![str(entry[@"type"]) isEqual:@"blob"] || !GHSHA(sha))
+          return done(nil, nil, httpErr(400, @"配置文件格式无效"));
+        if ([sha isEqual:known]) return done(nil, sha, nil);
+        [self getBlobData:sha done:^(NSData *bytes, NSError *err) {
+          NSString *text = bytes ? [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding] : nil;
+          done(text, sha, err ?: (text ? nil : httpErr(400, @"配置文件不是 UTF-8 文本")));
+        }];
+        return;
+      }
+      done(nil, nil, httpErr(404, @"远端没有可读取的 .env"));
+    }];
+  }];
+}
 - (void)headCommit:(void (^)(NSDictionary *, NSError *))done {
   [self request:@"GET" suffix:@"/commits/main" body:nil done:^(NSDictionary *j, NSError *e) {
     if (e) return done(nil, e);
@@ -745,9 +805,10 @@ static long long msFromDateString(NSString *s) {
     }];
     self->_memos = list;
     [self set:@"memos" error:nil];
+    [self changed];
     [LBHTTP JSON:@"GET" url:[self site:@"/api/shuoshuo-feed/version.json"] headers:nil body:nil done:^(id v, NSInteger st2, NSError *e2) {
     if (generation != self->_generation) { if (done) done(); return; }
-      self->_memosVersion = !e2 && dict(v) && [v[@"checkedAt"] isKindOfClass:NSNumber.class] ? v : nil;
+      if (!e2 && dict(v) && [v[@"checkedAt"] isKindOfClass:NSNumber.class]) self->_memosVersion = v;
       [self changed];
       if (done) done();
     }];
@@ -756,10 +817,10 @@ static long long msFromDateString(NSString *s) {
 
 - (void)refreshEnv:(void (^)(void))done {
   NSUInteger generation = _generation;
-  [LBGitHub.shared getFile:@".env" done:^(NSString *text, NSString *sha, NSError *e) {
+  [LBGitHub.shared checkEnvSinceBlob:_envSha done:^(NSString *text, NSString *sha, NSError *e) {
     if (generation != self->_generation) { if (done) done(); return; }
     [self set:@"env" error:e];
-    if (!e) { self->_envText = text; self->_envSha = sha; }
+    if (!e && text) { self->_envText = text; self->_envSha = sha; }
     [self changed];
     if (done) done();
   }];
@@ -827,6 +888,7 @@ static long long msFromDateString(NSString *s) {
         if (c && !e && ![str(self->_head[@"date"]) isEqualToString:str(c[@"date"])])
           self->_headAtMilliseconds = msFromDateString(str(c[@"date"]));
         if (c && !e) self->_head = c;
+        [self changed];
       }
       dispatch_group_leave(g);
     }];
@@ -841,6 +903,7 @@ static long long msFromDateString(NSString *s) {
       if (!e && ![str(self->_build[@"builtAt"]) isEqualToString:str(j[@"builtAt"])])
         self->_builtAtMilliseconds = msFromDateString(str(j[@"builtAt"]));
       if (!e) { self->_build = j; self->_deployCheckedAt = [NSDate date]; }
+      [self changed];
     }
     dispatch_group_leave(g);
   }];
@@ -865,6 +928,7 @@ static long long msFromDateString(NSString *s) {
         } else if (!self->_certs[host]) {
           self->_certs[host] = e ?: httpErr(-1, @"证书复核失败");
         }
+        [self changed];
       }
       dispatch_group_leave(g);
     }];
@@ -911,15 +975,17 @@ static long long msFromDateString(NSString *s) {
   return text;
 }
 
-- (void)refreshAll:(void (^)(void))done {
+- (void)refreshAll:(void (^)(void))done { [self refreshDashboardForUserAction:YES done:done]; }
+- (void)refreshDashboardForUserAction:(BOOL)manual done:(void (^)(void))done {
   dispatch_group_t g = dispatch_group_create();
   for (NSString *part in @[ @"memos", @"deploy", @"posts", @"env" ]) {
     if (LBSmokeTestMode() && ![part isEqualToString:@"posts"]) continue;
+    if (!manual && [part isEqualToString:@"posts"]) continue; // PostsModel owns the local index.
     if ([part isEqualToString:@"env"] && !LBGitHub.shared.configured) continue;
     dispatch_group_enter(g);
     void (^leave)(void) = ^{ dispatch_group_leave(g); };
     if ([part isEqualToString:@"memos"]) [self refreshMemos:leave];
-    else if ([part isEqualToString:@"deploy"]) [self refreshDeploy:leave forceCertificates:YES active:NO];
+    else if ([part isEqualToString:@"deploy"]) [self refreshDeploy:leave forceCertificates:manual active:NO];
     else if ([part isEqualToString:@"posts"]) [self refreshPosts:leave];
     else [self refreshEnv:leave];
   }

@@ -17,6 +17,7 @@ extern NSString *const LBMdStoreDidChange;
 /// Downloads preserve untracked local files, drafts and locally modified article/sidecar/assets;
 /// missing never-tracked assets are still filled for old seeded articles. Remote deletions remove
 /// only clean published mirrors; drafts and edits survive. Repository ownership is folder-scoped.
+- (nullable NSString *)lastPulledHead; // nil for an unsafe or pending workspace
 - (void)syncFromGitHub:(void (^)(NSError * _Nullable error))done;
 - (void)forceSyncFromGitHub:(void (^)(NSError * _Nullable error))done;
 - (void)publishArticle:(NSString *)noteId done:(void (^)(NSError * _Nullable error))done;
@@ -47,6 +48,9 @@ extern NSString *const LBMdStoreDidChange;
 /// tags, pinned, physical filePath/htmlPath, hasHTMLSidecar. Unpublished never-published
 /// notes have publishedAt=0; ordering uses publishedAt or createdAt descending, then ID.
 - (NSArray<NSDictionary *> *)listArticles;
+/// UI-only metadata index in Application Support. The editor always opens the actual file.
+- (NSArray<NSDictionary *> *)listArticlesWithIndexAtURL:(nullable NSURL *)indexURL;
+- (nullable NSArray<NSDictionary *> *)cachedArticleListAtURL:(NSURL *)indexURL;
 /// Independent read-only scan for background dashboard work. Owns its security
 /// scope for the entire scan; never renews or overwrites the selected bookmark.
 + (NSArray<NSDictionary *> *)listArticlesForFolderBookmark:(nullable NSData *)bookmark;
@@ -67,6 +71,16 @@ extern NSString *const LBMdStoreDidChange;
                   summary:(nullable NSString *)summary
                   publish:(BOOL)publish
                      tags:(nullable NSArray<NSString *> *)tags
+                    error:(NSError * _Nullable * _Nullable)outError;
+
+- (BOOL)saveArticleWithId:(NSString *)noteId
+                    title:(NSString *)title
+                 markdown:(NSString *)markdown
+                  summary:(nullable NSString *)summary
+                  publish:(BOOL)publish
+                     tags:(nullable NSArray<NSString *> *)tags
+         expectedRevision:(NSString *)revision
+                savedPost:(NSDictionary * _Nullable * _Nullable)savedPost
                     error:(NSError * _Nullable * _Nullable)outError;
 
 /// Delete local <noteId>.md (and sidecar <noteId>.html if present).

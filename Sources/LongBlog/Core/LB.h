@@ -77,6 +77,8 @@ extern NSString *const LBSiteDataDidChange;
 
 @interface LBKeychain : NSObject
 + (nullable NSString *)get:(NSString *)account;
++ (void)detach:(NSString *)account;
++ (nullable NSString *)getWithoutPrompt:(NSString *)account;
 + (void)set:(nullable NSString *)value account:(NSString *)account;
 @end
 
@@ -133,6 +135,7 @@ extern NSString *const LBSiteDataDidChange;
            done:(void (^)(NSString *_Nullable commitSha, NSError *_Nullable e))done;
 - (void)deleteFile:(NSString *)path sha:(nullable NSString *)sha message:(NSString *)message
               done:(void (^)(NSError *_Nullable e))done;
+- (void)checkEnvSinceBlob:(nullable NSString *)known done:(void (^)(NSString *_Nullable text, NSString *_Nullable sha, NSError *_Nullable error))done;
 - (void)headCommit:(void (^)(NSDictionary *_Nullable commit, NSError *_Nullable e))done;
 @end
 
@@ -150,6 +153,7 @@ extern NSString *const LBSiteDataDidChange;
 /// Returns an error message, or nil on success.
 - (nullable NSString *)updateValue:(NSString *)value forKey:(NSString *)key;
 - (NSString *)serialize;
+- (nullable NSString *)publicSnapshotText;
 - (NSDictionary<NSString *, NSString *> *)values;
 /// [{title, help, keys:[{key, help}], friends:BOOL}]
 - (NSArray<NSDictionary *> *)sections;
@@ -173,6 +177,7 @@ extern NSString *const LBSiteDataDidChange;
 @property (nonatomic, readonly) NSDictionary<NSString *, NSError *> *errors;
 - (void)resetConnection;
 - (void)refreshAll:(nullable void (^)(void))done;
+- (void)refreshDashboardForUserAction:(BOOL)manual done:(nullable void (^)(void))done;
 - (void)refreshPosts:(nullable void (^)(void))done;
 - (void)refreshMemos:(nullable void (^)(void))done;
 - (void)refreshEnv:(nullable void (^)(void))done;
