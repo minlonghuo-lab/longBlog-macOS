@@ -84,6 +84,7 @@ struct StagingReviewView: View {
         .frame(width: 740, height: 600)
         .foregroundStyle(Color.blogText)
         .background(Color.blogBackground)
+        .tint(Color.blogPeach)
         .interactiveDismissDisabled(model.busy)
     }
 
@@ -140,8 +141,10 @@ struct ConfigurationWorkspace: View {
                     let selected = model.selectedSection == index && model.search.isEmpty
                     let dirtyCount = model.dirtyCount(in: section)
                     Button {
-                        model.search = ""
-                        model.selectedSection = index
+                        withAnimation(.smooth(duration: 0.18)) {
+                            model.search = ""
+                            model.selectedSection = index
+                        }
                     } label: {
                         HStack(spacing: 10) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -370,6 +373,7 @@ struct ConfigurationWorkspace: View {
         .frame(width: 780, height: 620)
         .foregroundStyle(Color.blogText)
         .background(Color.blogBackground)
+        .tint(Color.blogPeach)
         .interactiveDismissDisabled(model.busy)
     }
 }
@@ -422,6 +426,7 @@ private struct ConfigField: View {
                         .foregroundStyle(Color.blogPeach)
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                     .help("还原为读取时的基准值")
                 }
             }

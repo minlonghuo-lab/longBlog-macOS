@@ -4,24 +4,17 @@ import UniformTypeIdentifiers
 
 struct PostsWorkspace: View {
     @ObservedObject var model: PostsModel
-    @ObservedObject private var app = AppModel.shared
     @State private var collapseListInStudio = false
-
-    private var showPostList: Bool {
-        !(app.focusMode && collapseListInStudio)
-    }
 
     var body: some View {
         VStack(spacing: 0) {
-            if !model.staged.isEmpty && !app.focusMode {
+            if !model.staged.isEmpty {
                 stagingBar
                 HairlineDivider()
             }
             HSplitView {
-                if showPostList {
-                    PostListColumn(model: model, compact: false)
-                        .frame(minWidth: 235, idealWidth: 280, maxWidth: 350)
-                }
+                PostListColumn(model: model, compact: false)
+                    .frame(minWidth: 235, idealWidth: 280, maxWidth: 350)
                 Group {
                     if model.draft.id.isEmpty {
                         if !model.loaded || model.running.contains("load") || !model.filtered.isEmpty {
@@ -30,9 +23,9 @@ struct PostsWorkspace: View {
                             EmptyWorkspace(
                                 symbol: "doc.richtext",
                                 title: "选择或新建一篇文章",
-                                detail: "本地 Markdown 编辑 → 暂存发布或下架 → 审阅 → 单个原子提交到 main。\n支持三栏实时预览（⌘⌥P）与专注工作台（⌘⇧F）。",
+                                detail: "本地 Markdown 编辑 → 暂存发布或下架 → 审阅 → 单个原子提交到 main。\n支持阅读（⌘⌥R）、纯编辑（⌘⌥E）与分栏实时预览（⌘⌥P）。",
                                 actionTitle: "新建文章  ⌘N",
-                                action: { app.newArticle() }
+                                action: { AppModel.shared.newArticle() }
                             )
                         }
                     } else {
@@ -88,12 +81,12 @@ private struct PostListColumn: View {
     @ObservedObject var model: PostsModel
     var compact = false
     @ObservedObject private var app = AppModel.shared
-    @FocusState private var searchFocused: Bool
+    @State private var searchFocusRequest = UUID()
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(spacing: 8) {
-                SearchField(prompt: "搜索标题、摘要或标签", text: $model.search, focused: $searchFocused)
+                SearchField(prompt: "搜索标题、摘要或标签", text: $model.search, focusRequest: searchFocusRequest)
                 if compact {
                     HStack {
                         Text("共 \(model.filtered.count) 篇 · \(model.folder)")
@@ -109,34 +102,42 @@ private struct PostListColumn: View {
 
             HairlineDivider()
 
-            if model.filtered.isEmpty {
-                EmptyWorkspace(
-                    symbol: "doc.text",
-                    title: model.search.isEmpty ? "暂无文章" : "没有匹配的文章",
-                    detail: model.search.isEmpty ? "新建本地文章，或在连接设置配置 GitHub 后同步。" : "换个关键词或切换筛选状态试试。",
-                    settings: !model.loaded && !model.errors.isEmpty
-                )
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: compact ? 4 : 8) {
-                        let staged = model.stagedIDs
-                        ForEach(model.filtered) { row in
-                            PostListCell(
-                                row: row,
-                                selected: row.id == model.draft.id,
-                                staged: staged.contains(row.id),
-                                dirty: row.id == model.draft.id && model.isDirty,
-                                compact: compact
-                            ) {
-                                model.select(row)
+            ZStack {
+                if model.filtered.isEmpty {
+                    EmptyWorkspace(
+                        symbol: "doc.text",
+                        title: model.search.isEmpty ? "暂无文章" : "没有匹配的文章",
+                        detail: model.search.isEmpty ? "新建本地文章，或在连接设置配置 GitHub 后同步。" : "换个关键词或切换筛选状态试试。",
+                        settings: !model.loaded && !model.errors.isEmpty
+                    )
+                    .id("empty-\(model.filter)")
+                    .transition(.opacity)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: compact ? 4 : 8) {
+                            let staged = model.stagedIDs
+                            ForEach(model.filtered) { row in
+                                PostListCell(
+                                    row: row,
+                                    selected: row.id == model.draft.id,
+                                    staged: staged.contains(row.id),
+                                    dirty: row.id == model.draft.id && model.isDirty,
+                                    compact: compact
+                                ) {
+                                    model.select(row)
+                                }
+                                .contextMenu { contextMenu(row) }
                             }
-                            .contextMenu { contextMenu(row) }
                         }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+                    .id("list-\(model.filter)")
+                    .transition(.opacity)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.smooth(duration: 0.18), value: model.filter)
 
             HairlineDivider()
 
@@ -162,6 +163,7 @@ private struct PostListColumn: View {
                         .foregroundStyle(Color.blogMuted)
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor(!model.busy)
                 .help("从 GitHub 同步文章和附件")
                 .accessibilityLabel("同步 GitHub 文章")
                 .disabled(model.busy)
@@ -170,7 +172,7 @@ private struct PostListColumn: View {
             .padding(.vertical, 9)
         }
         .onChange(of: app.searchRequested) {
-            if app.section == .posts { searchFocused = true }
+            if app.section == .posts { searchFocusRequest = UUID() }
         }
     }
 
@@ -327,18 +329,20 @@ private struct PostDetailView: View {
         Binding(
             get: { !model.editing ? .read : (model.splitPreview ? .split : .edit) },
             set: { value in
-                switch value {
-                case .read:
-                    model.editing = false
-                    if app.focusMode {
-                        withAnimation(.easeInOut(duration: 0.22)) { app.focusMode = false }
+                withAnimation(.smooth(duration: 0.2)) {
+                    switch value {
+                    case .read:
+                        model.editing = false
+                        if app.focusMode {
+                            app.focusMode = false
+                        }
+                    case .edit:
+                        model.editing = true
+                        model.splitPreview = false
+                    case .split:
+                        model.editing = true
+                        model.splitPreview = true
                     }
-                case .edit:
-                    model.editing = true
-                    model.splitPreview = false
-                case .split:
-                    model.editing = true
-                    model.splitPreview = true
                 }
             }
         )
@@ -348,7 +352,18 @@ private struct PostDetailView: View {
         VStack(spacing: 0) {
             header
             HairlineDivider()
-            if model.editing { editorArea } else { reader }
+            ZStack {
+                if model.editing {
+                    editorArea
+                        .transition(.opacity)
+                } else {
+                    reader
+                        .transition(.opacity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.smooth(duration: 0.18), value: model.editing)
+            .animation(.smooth(duration: 0.2), value: model.splitPreview)
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data], allowsMultipleSelection: true) { result in
             switch result {
@@ -387,20 +402,8 @@ private struct PostDetailView: View {
 
     private func headerRow(showBadges: Bool, compactActions: Bool) -> some View {
         HStack(spacing: 10) {
-            if app.focusMode {
-                Button {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
-                        collapseListInStudio.toggle()
-                    }
-                } label: {
-                    Image(systemName: collapseListInStudio ? "sidebar.left" : "rectangle.leadinghalf.inset.filled")
-                }
-                .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                .fixedSize()
-                .help(collapseListInStudio ? "显示文章列表（三栏工作台）" : "隐藏文章列表（纯净双栏）")
-            }
-
             BlogSegmentedControl(
+                title: "文章布局",
                 options: EditorLayout.allCases.map { SegmentedOption(value: $0, label: $0.rawValue, symbol: $0.symbol) },
                 selection: layout,
                 compact: true
@@ -426,35 +429,6 @@ private struct PostDetailView: View {
             Spacer(minLength: 8)
 
             BlogGlassGroup(spacing: 8) {
-                if app.focusMode {
-                    Button {
-                        app.focusMode = false
-                        app.sidebarCollapsed = false
-                    } label: {
-                        if compactActions {
-                            Image(systemName: "arrow.down.right.and.arrow.up.left")
-                        } else {
-                            Label("退出专注", systemImage: "arrow.down.right.and.arrow.up.left")
-                        }
-                    }
-                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                    .fixedSize()
-                    .help("退出专注模式  ⌘⇧F")
-                } else {
-                    Button {
-                        app.toggleFocusMode()
-                    } label: {
-                        if compactActions {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        } else {
-                            Label("专注", systemImage: "arrow.up.left.and.arrow.down.right")
-                        }
-                    }
-                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                    .fixedSize()
-                    .help("进入专注写作工作台  ⌘⇧F")
-                }
-
                 Button {
                     aiSnapshot = model.draft
                 } label: {
@@ -469,7 +443,7 @@ private struct PostDetailView: View {
                 .disabled(model.draft.bodyFormat == "html" || mutatingBusy)
                 .help("AI 写作辅助：摘要、润色、续写")
 
-                if model.editing && !app.focusMode {
+                if model.editing {
                     if model.isDirty {
                         Button("保存") {
                             model.save()
@@ -535,6 +509,7 @@ private struct PostDetailView: View {
                     #endif
                 }
                 .fixedSize()
+                .pointingHandCursor(!mutatingBusy)
                 .disabled(mutatingBusy)
                 .accessibilityLabel("暂存文章发布或下架")
             }
@@ -581,6 +556,7 @@ private struct PostDetailView: View {
                         .background(showLineNumbers ? Color.blogPeach.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
                 .help("切换行号显示")
                 appearanceMenu
             }
@@ -662,6 +638,7 @@ private struct PostDetailView: View {
                     .background(Color.blogSlot, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
             }
 
             if showMeta {
@@ -728,6 +705,7 @@ private struct PostDetailView: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .pointingHandCursor()
         .help("按标题大纲快速跳转")
     }
 
@@ -749,6 +727,7 @@ private struct PostDetailView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .pointingHandCursor()
         .help("编辑器排版与滚动设置")
     }
 
@@ -846,7 +825,9 @@ private struct PostDetailView: View {
             HStack(spacing: 10) {
                 BlogGlassGroup(spacing: 10) {
                     Button {
-                        model.editing = true
+                        withAnimation(.smooth(duration: 0.2)) {
+                            model.editing = true
+                        }
                     } label: {
                         HStack(spacing: 6) {
                             Text("编辑")
@@ -856,8 +837,10 @@ private struct PostDetailView: View {
                     .buttonStyle(BlogPrimaryButtonStyle())
 
                     Button {
-                        model.splitPreview = true
-                        model.editing = true
+                        withAnimation(.smooth(duration: 0.2)) {
+                            model.splitPreview = true
+                            model.editing = true
+                        }
                     } label: {
                         Label("分栏写作", systemImage: "rectangle.split.2x1")
                     }
@@ -963,19 +946,20 @@ private struct LivePreview: View {
 private struct PreviewThemeSwitch: View {
     @Binding var theme: String
     var onLightSurface = false
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         BlogSegmentedControl(
+            title: "预览纸色",
             options: [
                 SegmentedOption(value: "paper", label: "暖纸"),
                 SegmentedOption(value: "dark", label: "深色"),
                 SegmentedOption(value: "auto", label: "自动")
             ],
             selection: $theme,
-            compact: true,
-            onLightSurface: onLightSurface
+            compact: true
         )
-        .scaleEffect(0.88, anchor: .trailing)
-        .help("切换预览纸张底色（支持按住拖动切换：暖纸 / 深色 / 跟随外观）")
+        .environment(\.colorScheme, onLightSurface ? .light : colorScheme)
+        .help("选择预览纸色")
     }
 }

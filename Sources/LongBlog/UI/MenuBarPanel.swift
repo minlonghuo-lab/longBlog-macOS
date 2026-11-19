@@ -148,6 +148,7 @@ struct MenuBarPanelView: View {
                     Image(systemName: "arrow.clockwise").font(.system(size: 11.5, weight: .medium))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor(!dashboard.busy)
                 .foregroundStyle(Color.blogMuted)
                 .disabled(dashboard.busy)
                 .help("刷新状态")
@@ -241,6 +242,7 @@ struct MenuBarPanelView: View {
                         openWorkspace { app.review() }
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(Color.blogPeach)
                 } else {
@@ -283,6 +285,7 @@ struct MenuBarPanelView: View {
         .padding(16)
         .frame(width: 364)
         .foregroundStyle(Color.blogText)
+        .tint(Color.blogPeach)
         .modifier(MenuBarBackdropModifier())
     }
 }

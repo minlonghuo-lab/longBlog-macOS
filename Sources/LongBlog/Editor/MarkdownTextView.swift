@@ -872,11 +872,22 @@ struct MarkdownToolbar: View {
             Menu {
                 ForEach(overflow) { action in Button("\(action.title)\t\(action.shortcutLabel)") { controller.perform(action) } }
             } label: { Image(systemName: "ellipsis.circle") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("更多格式")
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().editorPointingHand().help("更多格式")
             if let attach = attach {
                 Divider().frame(height: 16).padding(.horizontal, 3)
                 ToolbarIcon(symbol: "paperclip", help: "插入附件 / 图片（也可直接粘贴或拖入编辑器）", action: attach)
             }
+        }
+    }
+}
+
+private extension View {
+    /// Local copy so MarkdownTextView remains standalone for EditorFixtures.
+    @ViewBuilder func editorPointingHand() -> some View {
+        if #available(macOS 15.0, *) {
+            pointerStyle(.link)
+        } else {
+            self
         }
     }
 }
@@ -890,7 +901,7 @@ struct ToolbarIcon: View {
                 .background(hovering ? Color.blogSurfaceHover : .clear, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain).foregroundStyle(hovering ? Color.blogPeach : Color.blogText.opacity(0.82))
-        .onHover { hovering = $0 }.help(help).accessibilityLabel(help)
+        .onHover { hovering = $0 }.editorPointingHand().help(help).accessibilityLabel(help)
     }
 }
 

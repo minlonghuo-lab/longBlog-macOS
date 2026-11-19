@@ -98,13 +98,19 @@ struct ConnectionSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 Section("外观与桌面体验") {
-                    Picker("界面外观", selection: Binding(
-                        get: { appearance },
-                        set: { appearance = $0; AppAppearance.apply(AppAppearance(rawValue: $0)) }
-                    )) {
-                        ForEach(AppAppearance.allCases) { Text($0.title).tag($0.rawValue) }
+                    HStack {
+                        Text("界面外观")
+                        Spacer()
+                        BlogSegmentedControl(
+                            title: "界面外观",
+                            options: AppAppearance.allCases.map { SegmentedOption(value: $0.rawValue, label: $0.title, symbol: $0.symbol) },
+                            selection: Binding(
+                                get: { appearance },
+                                set: { appearance = $0; AppAppearance.apply(AppAppearance(rawValue: $0)) }
+                            ),
+                            compact: true
+                        )
                     }
-                    .pickerStyle(.segmented)
 
                     Toggle("在系统菜单栏显示常驻快捷面板", isOn: Binding(
                         get: { menuBarEnabled },
@@ -154,6 +160,7 @@ struct ConnectionSettingsView: View {
         .frame(width: 720, height: 760)
         .foregroundStyle(Color.blogText)
         .background(Color.blogBackground)
+        .tint(Color.blogPeach)
         .interactiveDismissDisabled(dirty || status.busy)
         .task {
             guard !loadedSettings else { return }
