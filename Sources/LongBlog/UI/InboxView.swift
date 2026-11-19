@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 
 struct InboxWorkspace: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: InboxModel
     @FocusState private var replyFocused: Bool
 
@@ -25,7 +26,6 @@ struct InboxWorkspace: View {
                     }
                 }
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
-                .animation(.easeInOut(duration: 0.18), value: model.archived)
                 .overlay(alignment: .bottom) { OperationStatus(model: model).padding(.bottom, 16) }
             }
         }
@@ -35,6 +35,7 @@ struct InboxWorkspace: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 BlogSegmentedControl(
+                    title: "会话列表",
                     options: [
                         SegmentedOption(value: false, label: "进行中"),
                         SegmentedOption(value: true, label: "归档记录")
@@ -92,7 +93,7 @@ struct InboxWorkspace: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .animation(.easeInOut(duration: 0.18), value: model.archived)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: model.archived)
         }
     }
 
@@ -158,6 +159,7 @@ struct InboxWorkspace: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor()
                     .help("点击复制完整会话 ID")
                 }
 
@@ -194,6 +196,7 @@ struct InboxWorkspace: View {
                             Image(systemName: "xmark").font(.system(size: 11)).foregroundStyle(Color.blogMuted)
                         }
                         .buttonStyle(.plain)
+                        .pointingHandCursor()
                         .accessibilityLabel("关闭联系信息")
                     }
                     if contact.isEmpty {

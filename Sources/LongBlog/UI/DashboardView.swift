@@ -229,6 +229,7 @@ struct DashboardView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .pointingHandCursor()
                         .help("点击复制完整提交哈希")
                     } else {
                         Text("—")
@@ -359,6 +360,7 @@ private struct DashboardMetricCard: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .pointingHandCursor()
     }
 }
 
@@ -401,6 +403,7 @@ private struct InboxDashboardCard: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .pointingHandCursor()
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -411,6 +414,7 @@ private struct InboxDashboardCard: View {
         )
         .offset(y: hovering ? -1.5 : 0)
         .onHover { hovering = $0 }
+        .pointingHandCursor()
         .animation(.easeOut(duration: 0.14), value: hovering)
     }
 }

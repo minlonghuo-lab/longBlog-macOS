@@ -67,6 +67,7 @@ struct AIWritingSheet: View {
             .font(.system(size: 12.5, weight: .medium))
 
             BlogSegmentedControl(
+                title: "写作操作",
                 options: WritingAction.allCases.map { SegmentedOption(value: $0, label: $0.rawValue) },
                 selection: $action
             )

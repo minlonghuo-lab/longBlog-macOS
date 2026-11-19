@@ -145,6 +145,8 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     @Published var showingSettings = false
     @Published var showingReview = false
     @Published var showingCommandPalette = false
+    @Published var showingShortcutsHelp = false
+    @Published var isWindowZoomed = false
     @Published var focusMode = false
     @Published var sidebarCollapsed = false
     @Published var searchRequested = UUID()
@@ -159,7 +161,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     private var paletteSavedFieldSelection: NSRange?
     static let commandNames = ["newArticle", "newMemo", "save", "review", "refresh", "search", "editArticle",
                                "nav.dashboard", "nav.inbox", "nav.posts", "nav.memos", "nav.configuration", "settings",
-                               "layout.read", "layout.edit", "layout.split", "commandPalette", "toggleFocus", "toggleSidebar"]
+                               "layout.read", "layout.edit", "layout.split", "commandPalette", "shortcutsHelp", "toggleWindowZoom", "toggleFocus", "toggleSidebar"]
 
     /// Menu commands are routed ONCE here (not per view), so a second window or a
     /// re-created RootView can never execute ⌘N / ⌘S twice.
@@ -256,14 +258,13 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     func navigate(_ target: WorkspaceSection, reloadingSelectedInbox: Bool = true) {
         if section != target {
             if section == .inbox { inbox.setActiveSession(nil) }
-            withAnimation(.easeOut(duration: 0.16)) {
-                section = target
-                if target != .posts && focusMode { focusMode = false }
-            }
+            section = target
+            if target != .posts && focusMode { focusMode = false }
             if target == .inbox, reloadingSelectedInbox, let selected = inbox.selected, !inbox.archived {
                 inbox.setActiveSession(selected.id)
                 inbox.loadMessages()
             }
+            (NSApp.delegate as? LongBlogAppDelegate)?.suppressTitlebarHoverHighlight()
         }
         refreshIfNeeded()
     }
@@ -412,12 +413,13 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     }
 
     func toggleCommandPalette() {
-        // Inside Markdown editor, ⌘K inserts a link; MarkdownTextView intercepts ⌘K directly when focused.
-        if showingCommandPalette {
-            closeCommandPalette(restoreFocus: true)
-        } else {
-            openCommandPalette()
-        }
+        showingShortcutsHelp.toggle()
+    }
+    func toggleShortcutsHelp() {
+        showingShortcutsHelp.toggle()
+    }
+    func toggleWindowZoom() {
+        (NSApp.delegate as? LongBlogAppDelegate)?.toggleWindowZoom()
     }
     func search() {
         // Inside the Markdown editor ⌘F opens the in-document find bar instead.
@@ -426,8 +428,7 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
             editor.performTextFinderAction(item); return
         }
         if section == .dashboard {
-            openCommandPalette()
-            return
+            navigate(.posts)
         }
         searchRequested = UUID()
     }
@@ -441,7 +442,6 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         guard !Self.activeTextInputHasMarkedText,
               confirmation == nil, NSApp.modalWindow == nil, NSApp.keyWindow?.sheetParent == nil,
               NSApp.mainWindow?.attachedSheet == nil else { return }
-        if showingCommandPalette && name != "commandPalette" { return }
         switch name {
         case "newArticle": newArticle()
         case "newMemo": newMemo()
@@ -451,7 +451,8 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case "search": search()
         case "editArticle": editArticle()
         case "settings": showingSettings = true
-        case "commandPalette": toggleCommandPalette()
+        case "commandPalette", "shortcutsHelp": toggleShortcutsHelp()
+        case "toggleWindowZoom": toggleWindowZoom()
         case "toggleFocus": toggleFocusMode()
         case "toggleSidebar": sidebarCollapsed.toggle()
         case "nav.dashboard": navigate(.dashboard)
@@ -795,6 +796,7 @@ struct PostDraft: Equatable {
     @Published var messageCursor = 0
     @Published var failedReply: (id: String, text: String)?
     var pendingSelectID: String?
+    private var listRevision = UUID()
     private var selectionRevision = UUID()
 
     var filtered: [DataRow] {
@@ -852,11 +854,13 @@ struct PostDraft: Equatable {
         var args: [String: Any] = [:]
         if more && !archiveCursor.isEmpty { args["cursor"] = archiveCursor }
         let targetArchive = archived
+        let revision = listRevision
+        let previous = more ? sessions : []
         run("sessions", targetArchive ? "inbox.archives" : "inbox.list", args) { result in
-            let nextRows = more ? self.sessions + rows(result["rows"]) : rows(result["rows"])
+            let nextRows = previous + rows(result["rows"])
             self.cachedSessionsByArchive[targetArchive] = nextRows
             self.cachedLoadedByArchive[targetArchive] = true
-            guard self.archived == targetArchive else { return }
+            guard self.listRevision == revision, self.archived == targetArchive else { return }
             withAnimation(.easeInOut(duration: 0.16)) {
                 self.sessions = nextRows
                 self.loaded = true
@@ -882,20 +886,24 @@ struct PostDraft: Equatable {
         let action = {
             self.pendingSelectID = sessionID
             self.setActiveSession(nil)
-            withAnimation(.easeInOut(duration: 0.18)) {
-                self.archived = value
-                self.selected = nil
-                self.messages = []
-                self.reply = ""
-                self.failedReply = nil
-                self.contact = nil
-                self.selectionRevision = UUID()
-                self.sessions = self.cachedSessionsByArchive[value] ?? []
-                self.loaded = self.cachedLoadedByArchive[value] ?? false
+            if self.loaded {
+                self.cachedSessionsByArchive[self.archived] = self.sessions
+                self.cachedLoadedByArchive[self.archived] = true
             }
-            // Defer remote refresh slightly so the segmented slider spring & crossfade finish at 120fps.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) {
-                guard self.archived == value, !self.busy else { return }
+            let revision = UUID()
+            self.listRevision = revision
+            self.archived = value
+            self.selected = nil
+            self.messages = []
+            self.reply = ""
+            self.failedReply = nil
+            self.contact = nil
+            self.selectionRevision = UUID()
+            self.archiveCursor = ""
+            self.sessions = self.cachedSessionsByArchive[value] ?? []
+            self.loaded = self.cachedLoadedByArchive[value] ?? false
+            self.whenIdle {
+                guard self.listRevision == revision else { return }
                 self.refresh()
             }
         }
@@ -1004,32 +1012,16 @@ struct PostDraft: Equatable {
             let id = UUID()
             self.checkID = id
             self.nextCheck = .distantPast
-            withAnimation(.easeInOut(duration: 0.18)) {
-                self.archived = value
-                if let cached = self.cachedRowsByArchive[value] {
-                    self.items = cached
-                    self.loaded = self.cachedLoadedByArchive[value] ?? true
-                    self.more = false
-                }
-            }
-            if let first = self.cachedRowsByArchive[value]?.first {
-                self.assign(first.data)
-            } else if self.cachedRowsByArchive[value] != nil {
-                self.original = nil; self.selectedID = nil; self.content = ""; self.resources = []
-                self.savedContent = ""; self.savedResourceIDs = []; self.editing = false
-            }
-            // Load disk cache & remote check after slider release animation starts so main thread stays 120fps.
+            self.archived = value
+            self.items = self.cachedRowsByArchive[value] ?? []
+            self.loaded = self.cachedLoadedByArchive[value] ?? false
+            self.more = false
+            self.assign(self.items.first?.data)
+            self.editing = !self.items.isEmpty
             LBUIRequest("memos.cached", ["state": targetState]) { result, _ in
                 guard self.checkID == id, self.archived == value else { return }
-                if let list = result?["rows"] as? [[String: Any]] {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        self.display(list)
-                    }
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
-                    guard self.checkID == id, self.archived == value else { return }
-                    self.check(manual: false, id: id)
-                }
+                if let list = result?["rows"] as? [[String: Any]] { self.display(list) }
+                self.check(manual: false, id: id)
             }
         }
     }

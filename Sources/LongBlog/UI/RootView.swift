@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import QuartzCore
 
 struct RootView: View {
     @StateObject private var app = AppModel.shared
@@ -8,94 +10,30 @@ struct RootView: View {
     @ObservedObject private var configuration = AppModel.shared.configuration
     @ObservedObject private var dashboard = AppModel.shared.dashboard
 
-    @State private var mountedSections: Set<WorkspaceSection> = [.dashboard]
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
-    @FocusState private var searchFocused: Bool
+    @State private var searchFocusRequest = UUID()
 
     private var sidebarShouldHide: Bool {
-        app.sidebarCollapsed || app.focusMode
+        app.sidebarCollapsed
     }
 
     var body: some View {
-        ZStack {
-            NavigationSplitView(columnVisibility: $columnVisibility) {
-                WorkspaceSidebar(app: app)
-                    .navigationSplitViewColumnWidth(min: 214, ideal: 234, max: 268)
-            } detail: {
-                sectionContent
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background { AmbientCanvasBackground().ignoresSafeArea() }
-                    .navigationTitle(toolbarTitle)
-                    .navigationSubtitle(statusSubtitle.text)
-                    .toolbar {
-                        if !(app.section == .configuration && configuration.baseline.isEmpty && !configuration.isDirty)
-                            && !(app.section == .posts && app.focusMode) {
-                            #if compiler(>=6.2)
-                            if #available(macOS 26.0, *) {
-                                ToolbarItem(placement: .principal) {
-                                    toolbarCenterControls
-                                }
-                                .sharedBackgroundVisibility(.hidden)
-                            } else {
-                                ToolbarItem(placement: .principal) {
-                                    toolbarCenterControls
-                                }
-                            }
-                            #else
-                            ToolbarItem(placement: .principal) {
-                                toolbarCenterControls
-                            }
-                            #endif
-                        }
-
-                        if busy {
-                            #if compiler(>=6.2)
-                            if #available(macOS 26.0, *) {
-                                ToolbarItem(placement: .primaryAction) {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                }
-                                .sharedBackgroundVisibility(.hidden)
-                            } else {
-                                ToolbarItem(placement: .primaryAction) {
-                                    ProgressView()
-                                        .controlSize(.small)
-                                }
-                            }
-                            #else
-                            ToolbarItem(placement: .primaryAction) {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                            #endif
-                        }
-
-                        #if compiler(>=6.2)
-                        if #available(macOS 26.0, *) {
-                            ToolbarItem(placement: .primaryAction) { toolbarActions }
-                                .sharedBackgroundVisibility(.hidden)
-                        } else {
-                            ToolbarItem(placement: .primaryAction) { toolbarActions }
-                        }
-                        #else
-                        ToolbarItem(placement: .primaryAction) { toolbarActions }
-                        #endif
-                    }
-            }
-            .navigationSplitViewStyle(.balanced)
-
-            if app.showingCommandPalette {
-                CommandPaletteOverlay(app: app)
-            }
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            WorkspaceSidebar(app: app)
+                .navigationSplitViewColumnWidth(min: 214, ideal: 234, max: 268)
+        } detail: {
+            detailColumn
         }
-        .frame(minWidth: 1020, minHeight: 660)
+        .navigationSplitViewStyle(.balanced)
+        .frame(minWidth: 1020, maxWidth: .infinity, minHeight: 660, maxHeight: .infinity)
         .foregroundStyle(Color.blogText)
+        .tint(Color.blogPeach)
         .onAppear {
-            mountedSections.insert(app.section)
             columnVisibility = sidebarShouldHide ? .detailOnly : .all
+            (NSApp.delegate as? LongBlogAppDelegate)?.suppressTitlebarHoverHighlight()
         }
-        .onChange(of: app.section) { _, next in
-            mountedSections.insert(next)
+        .onChange(of: app.section) { _, _ in
+            (NSApp.delegate as? LongBlogAppDelegate)?.suppressTitlebarHoverHighlight()
         }
         .onChange(of: sidebarShouldHide) { _, hide in
             let target: NavigationSplitViewVisibility = hide ? .detailOnly : .all
@@ -108,15 +46,14 @@ struct RootView: View {
         .onChange(of: columnVisibility) { _, vis in
             // Keep app state synced when the user clicks macOS's native toolbar sidebar button.
             if vis == .all {
-                if app.focusMode { app.focusMode = false }
                 if app.sidebarCollapsed { app.sidebarCollapsed = false }
             } else if vis == .detailOnly {
-                if !app.focusMode && !app.sidebarCollapsed { app.sidebarCollapsed = true }
+                if !app.sidebarCollapsed { app.sidebarCollapsed = true }
             }
         }
         .onChange(of: app.searchRequested) {
             if [.inbox, .memos, .configuration].contains(app.section) {
-                searchFocused = true
+                searchFocusRequest = UUID()
             }
         }
         .task {
@@ -134,31 +71,61 @@ struct RootView: View {
         .sheet(isPresented: $app.showingReview) { StagingReviewView(model: app.posts) }
     }
 
-    // MARK: - Persistent Section Host (Zero WKWebView Rebuild)
+    @ViewBuilder private var detailColumn: some View {
+        let base = sectionContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background { AmbientCanvasBackground().ignoresSafeArea() }
+            .navigationTitle(toolbarTitle)
+            .navigationSubtitle(statusSubtitle.text)
+            .toolbar {
+                // Keep toolbar item structure & sharedBackgroundVisibility 100% static across
+                // all sections so NSToolbar never rebuilds or flashes NSScrollPocket on switch.
+                #if compiler(>=6.2)
+                if #available(macOS 26.0, *) {
+                    ToolbarItem(placement: .principal) {
+                        toolbarCenterControls
+                    }
+                    .sharedBackgroundVisibility(.hidden)
 
-    @ViewBuilder private var sectionContent: some View {
-        ZStack {
-            ForEach(WorkspaceSection.allCases) { sec in
-                if mountedSections.contains(sec) || app.section == sec {
-                    sectionView(sec)
-                        .opacity(app.section == sec ? 1 : 0)
-                        .allowsHitTesting(app.section == sec)
-                        .accessibilityHidden(app.section != sec)
-                        .zIndex(app.section == sec ? 1 : 0)
+                    ToolbarItem(placement: .primaryAction) { toolbarActions }
+                        .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .principal) { toolbarCenterControls }
+                    ToolbarItem(placement: .primaryAction) { toolbarActions }
                 }
+                #else
+                ToolbarItem(placement: .principal) { toolbarCenterControls }
+                ToolbarItem(placement: .primaryAction) { toolbarActions }
+                #endif
             }
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            base
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+                .scrollEdgeEffectHidden(true, for: .top)
+        } else if #available(macOS 15.0, *) {
+            base
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            base
+                .toolbarBackground(.hidden, for: .windowToolbar)
         }
-        .transaction { $0.animation = nil }
+        #else
+        if #available(macOS 15.0, *) {
+            base
+                .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            base
+                .toolbarBackground(.hidden, for: .windowToolbar)
+        }
+        #endif
     }
 
-    @ViewBuilder private func sectionView(_ sec: WorkspaceSection) -> some View {
-        switch sec {
-        case .dashboard: DashboardView(model: app.dashboard)
-        case .inbox: InboxWorkspace(model: app.inbox)
-        case .posts: PostsWorkspace(model: app.posts)
-        case .memos: MemosWorkspace(model: app.memos)
-        case .configuration: ConfigurationWorkspace(model: app.configuration)
-        }
+    // MARK: - Persistent Section Host (AppKit isHidden Isolation + GPU CATransition)
+
+    @ViewBuilder private var sectionContent: some View {
+        PersistentSectionHost(activeSection: app.section, app: app)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Toolbar Metadata & Controls
@@ -208,10 +175,6 @@ struct RootView: View {
             }
             return (nil, "从站点、仓库与本地工作区读取真实状态", .blogMuted)
         case .posts:
-            if app.focusMode && !posts.draft.title.isEmpty {
-                let state = posts.draft.published ? "已发布" : "草稿"
-                return (posts.isDirty ? .blogPeach : .blogGreen, "\(state)\(posts.isDirty ? " · 未保存" : " · 专注写作中")", .blogMuted)
-            }
             return (nil, posts.loaded ? "共 \(posts.articles.count) 篇 · \(posts.folder)" : "本地 Markdown 工作区", .blogMuted)
         case .inbox:
             if inbox.loaded {
@@ -243,157 +206,119 @@ struct RootView: View {
     }
 
     private var toolbarTitle: String {
-        if app.section == .posts && app.focusMode {
-            return "专注写作"
-        }
         if app.section == .inbox { return "终端留言" }
         return app.section.rawValue
     }
 
     @ViewBuilder private var toolbarCenterControls: some View {
-        switch app.section {
-        case .dashboard:
-            Button {
-                app.toggleCommandPalette()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(Color.blogMuted)
-                    Text("搜索或命令…")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.blogMuted)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("⌘K")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(Color.blogMuted.opacity(0.75))
-                }
-                .padding(.horizontal, 12)
-                .frame(width: 224, height: WorkspaceToolbarMetrics.height)
-                .blogGlassControl(capsule: true, interactive: true, fallbackFill: .blogField)
-            }
-            .buttonStyle(.plain)
-            .help("打开快速搜索与命令面板  ⌘K / ⌘F")
+        ZStack {
+            switch app.section {
+            case .dashboard:
+                Color.clear
+                    .frame(width: 1, height: 30)
 
-        case .posts:
-            if !app.focusMode {
+            case .posts:
                 BlogSegmentedControl(
+                    title: "文章状态",
                     options: [
                         SegmentedOption(value: "全部", label: "全部", count: posts.loaded ? posts.articles.count : nil),
                         SegmentedOption(value: "草稿", label: "草稿", count: posts.loaded ? posts.draftCount : nil),
                         SegmentedOption(value: "已发布", label: "已发布", count: posts.loaded ? posts.publishedCount : nil)
                     ],
                     selection: $posts.filter,
-                    compact: true, toolbarSized: true
+                    compact: false
                 )
-            }
 
-        case .inbox:
-            SearchField(prompt: "搜索会话或留言", text: search, focused: $searchFocused, toolbarSized: true)
-                .frame(width: 224)
-                .accessibilityLabel("搜索当前板块")
+            case .inbox:
+                toolbarSearchPill(prompt: "搜索会话或留言", label: "搜索当前板块")
 
-        case .memos:
-            SearchField(prompt: "搜索说说", text: search, focused: $searchFocused, toolbarSized: true) {
-                memos.load()
-            }
-            .frame(width: 224)
-            .accessibilityLabel("搜索当前板块")
-
-        case .configuration:
-            HStack(spacing: 8) {
-                if !configuration.baseline.isEmpty {
-                    SearchField(prompt: "筛选配置项", text: search, focused: $searchFocused, toolbarSized: true)
-                        .frame(width: 224)
-                        .accessibilityLabel("搜索配置项")
+            case .memos:
+                toolbarSearchPill(prompt: "搜索说说", label: "搜索当前板块") {
+                    memos.load()
                 }
-                if configuration.isDirty {
-                    StatusBadge(text: "已修改 \(configuration.changedKeys.count) 项", color: .blogPeach, pill: true)
+
+            case .configuration:
+                HStack(spacing: 8) {
+                    if !configuration.baseline.isEmpty {
+                        toolbarSearchPill(prompt: "筛选配置项", label: "搜索配置项")
+                    } else {
+                        Color.clear.frame(width: 1, height: 30)
+                    }
+                    if configuration.isDirty {
+                        StatusBadge(text: "已修改 \(configuration.changedKeys.count) 项", color: .blogPeach, pill: true)
+                    }
                 }
             }
         }
+        .frame(minHeight: 30)
+        .transaction { $0.animation = nil }
+    }
+
+    private func toolbarSearchPill(prompt: String, label: String, onSubmit: @escaping () -> Void = {}) -> some View {
+        SearchField(prompt: prompt, text: search, focusRequest: searchFocusRequest, borderless: true, onSubmit: onSubmit)
+            .padding(.horizontal, 10)
+            .frame(width: 224, height: 30)
+            .background(Capsule().fill(Color.blogSlot))
+            .overlay(Capsule().strokeBorder(Color.blogStrokeStrong, lineWidth: 0.8))
+            .accessibilityLabel(label)
     }
 
     private var toolbarActions: some View {
-        HStack(spacing: 10) {
-            Button { app.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(ToolbarIconButtonStyle())
-                .accessibilityLabel("刷新当前板块")
-                .help("刷新当前板块  ⌘R")
-                .disabled(busy)
-            if app.section == .posts && app.focusMode {
-                Button("保存") { posts.save() }
-                    .buttonStyle(ToolbarPillButtonStyle(prominent: false, minWidth: 60))
-                    .disabled(!posts.isDirty || posts.busy)
-                    .help("保存到本地  ⌘S")
+        BlogGlassGroup(spacing: 8) {
+            Button {
+                app.showingShortcutsHelp.toggle()
+            } label: {
+                Image(systemName: "questionmark")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 16, height: 16)
             }
+            .buttonStyle(BlogSecondaryButtonStyle(large: true, shape: .circle))
+            .accessibilityLabel("快捷键帮助")
+            .help("查看快捷键指南  ⌘/")
+            .popover(isPresented: $app.showingShortcutsHelp, arrowEdge: .bottom) {
+                ShortcutsHelpPopover()
+            }
+
+            Button { app.refresh() } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 13, weight: .medium))
+                    .opacity(busy ? 0.45 : 1.0)
+                    .frame(width: 16, height: 16)
+            }
+            .buttonStyle(BlogSecondaryButtonStyle(large: true, shape: .circle))
+            .accessibilityLabel("刷新当前板块")
+            .help("刷新当前板块  ⌘R")
+            .disabled(busy)
+
             primaryAction
         }
         .fixedSize()
-        .padding(.trailing, WorkspaceToolbarMetrics.trailingInset)
+        .padding(.trailing, 22)
     }
 
     @ViewBuilder private var primaryAction: some View {
         switch app.section {
         case .dashboard:
-            Button { app.newArticle() } label: {
-                HStack(spacing: 5) {
-                    Text("新建文章")
-                    ShortcutCap(text: "⌘N", onPrimary: true)
-                }
-            }
-            .buttonStyle(ToolbarPillButtonStyle())
+            Button("新建文章") { app.newArticle() }
+            .buttonStyle(BlogPrimaryButtonStyle(large: true))
             .disabled(posts.busy)
             .help("新建文章  ⌘N")
 
         case .posts:
-            if app.focusMode {
-                if !posts.staged.isEmpty {
-                    Button { posts.review() } label: {
-                        HStack(spacing: 4) {
-                            Text("提交发布（\(posts.staged.count)）")
-                            ShortcutCap(text: "⌘⇧P", onPrimary: true)
-                        }
-                    }
-                    .buttonStyle(ToolbarPillButtonStyle())
-                    .disabled(posts.busy)
-                } else {
-                    Button("暂存发布") { posts.stage(true) }
-                        .buttonStyle(ToolbarPillButtonStyle())
-                        .disabled(posts.busy || posts.draft.id.isEmpty)
-                }
-            } else {
-                Button { app.newArticle() } label: {
-                    HStack(spacing: 5) {
-                        Text("新建文章")
-                        ShortcutCap(text: "⌘N", onPrimary: true)
-                    }
-                }
-                .buttonStyle(ToolbarPillButtonStyle())
-                .disabled(posts.busy)
-                .help("新建文章  ⌘N")
-            }
+            Button("新建文章") { app.newArticle() }
+            .buttonStyle(BlogPrimaryButtonStyle(large: true))
+            .disabled(posts.busy)
+            .help("新建文章  ⌘N")
 
         case .memos:
-            Button { app.newMemo() } label: {
-                HStack(spacing: 5) {
-                    Text("写说说")
-                    ShortcutCap(text: "⌘⇧N", onPrimary: true)
-                }
-            }
-            .buttonStyle(ToolbarPillButtonStyle())
+            Button("写说说") { app.newMemo() }
+            .buttonStyle(BlogPrimaryButtonStyle(large: true))
             .disabled(memos.busy)
             .help("写说说  ⌘⇧N")
 
         case .configuration:
-            Button { configuration.review() } label: {
-                HStack(spacing: 5) {
-                    Text("提交到 main")
-                    ShortcutCap(text: "⌘S", onPrimary: true)
-                }
-            }
-            .buttonStyle(ToolbarPillButtonStyle())
+            Button("提交到 main") { configuration.review() }
+            .buttonStyle(BlogPrimaryButtonStyle(large: true))
             .disabled(!configuration.isDirty || configuration.busy)
             .help("审阅并提交配置变更  ⌘S")
 
@@ -402,7 +327,7 @@ struct RootView: View {
                 Label(inbox.archived ? "返回进行中" : "归档记录", systemImage: inbox.archived ? "tray" : "archivebox")
             }
             .labelStyle(.titleAndIcon)
-            .buttonStyle(ToolbarPillButtonStyle(prominent: false))
+            .buttonStyle(BlogSecondaryButtonStyle(large: true))
             .disabled(inbox.busy)
         }
     }
@@ -418,7 +343,6 @@ private struct WorkspaceSidebar: View {
     @ObservedObject private var dashboard = AppModel.shared.dashboard
     @ObservedObject private var config = AppModel.shared.configuration
     @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.dark.rawValue
-    @State private var cmdHover = false
     @State private var settingsHover = false
 
     private var repoLine: String {
@@ -439,64 +363,30 @@ private struct WorkspaceSidebar: View {
 
     var body: some View {
         List {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 9) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.blogPeach.opacity(0.20))
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.blogPeach.opacity(0.38)))
-                        Image(systemName: "terminal")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(Color.blogPeach)
-                    }
-                    .frame(width: 28, height: 28)
-
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("longBlog")
-                            .font(.system(size: 14.5, weight: .semibold))
-                            .tracking(0.2)
-                        Text("macOS Studio")
-                            .font(.system(size: 10.5))
-                            .foregroundStyle(Color.blogMuted)
-                    }
-                    Spacer()
+            HStack(spacing: 9) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.blogPeach.opacity(0.20))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.blogPeach.opacity(0.38)))
+                    Image(systemName: "terminal")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color.blogPeach)
                 }
-                .padding(.horizontal, 2)
+                .frame(width: 28, height: 28)
 
-                Button {
-                    app.toggleCommandPalette()
-                } label: {
-                    HStack(spacing: 7) {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(Color.blogMuted)
-                        Text("快速跳转与命令…")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Color.blogMuted)
-                            .lineLimit(1)
-                        Spacer()
-                        Text("⌘K")
-                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                            .foregroundStyle(Color.blogMuted.opacity(0.85))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1.5)
-                            .background(Color.blogSlot, in: Capsule())
-                    }
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 6.5)
-                    .blogGlassControl(
-                        capsule: true,
-                        interactive: true,
-                        fallbackFill: cmdHover ? .blogSurfaceHover : .blogField,
-                        fallbackStroke: .blogStroke
-                    )
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("longBlog")
+                        .font(.system(size: 14.5, weight: .semibold))
+                        .tracking(0.2)
+                    Text("macOS Studio")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Color.blogMuted)
                 }
-                .buttonStyle(.plain)
-                .onHover { cmdHover = $0 }
-                .help("打开命令面板  ⌘K / ⌘P")
+                Spacer()
             }
+            .padding(.horizontal, 4)
             .padding(.top, 2)
-            .padding(.bottom, 6)
+            .padding(.bottom, 4)
             .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
             .listRowSeparator(.hidden)
             .listRowBackground(Color.clear)
@@ -521,54 +411,71 @@ private struct WorkspaceSidebar: View {
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 8) {
-                HairlineDivider()
-                HStack(alignment: .center, spacing: 6) {
-                    Button {
-                        app.showingSettings = true
-                    } label: {
-                        HStack(spacing: 6) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(repoLine)
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(Color.blogSecondary)
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.9)
-                                Text(branchLine)
-                                    .font(.system(size: 10.5, design: .monospaced))
-                                    .foregroundStyle(Color.blogMuted)
-                                    .lineLimit(1)
-                            }
-                            Spacer(minLength: 2)
-                            Image(systemName: "gearshape")
-                                .font(.system(size: 12))
+            HStack(alignment: .center, spacing: 4) {
+                Button {
+                    app.showingSettings = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(!posts.staged.isEmpty ? Color.blogPeach : Color.blogGreen)
+                            .frame(width: 6.5, height: 6.5)
+                        VStack(alignment: .leading, spacing: 1.5) {
+                            Text(repoLine)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundStyle(Color.blogText.opacity(0.92))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.88)
+                            Text(branchLine)
+                                .font(.system(size: 10.5, design: .monospaced))
                                 .foregroundStyle(Color.blogMuted)
+                                .lineLimit(1)
                         }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 6)
-                        .contentShape(Rectangle())
-                        .background(settingsHover ? Color.blogSurfaceHover : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        Spacer(minLength: 2)
                     }
-                    .buttonStyle(.plain)
-                    .onHover { settingsHover = $0 }
-                    .help("服务与连接设置  ⌘,")
-                    .accessibilityLabel("连接设置")
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(
+                        settingsHover ? Color.blogSurfaceHover : .clear,
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+                }
+                .buttonStyle(.plain)
+                .onHover { settingsHover = $0 }
+                .pointingHandCursor()
+                .help("服务与连接设置  ⌘,")
+                .accessibilityLabel("连接设置")
 
-                    Button {
+                Rectangle()
+                    .fill(Color.blogDivider)
+                    .frame(width: 1, height: 22)
+                    .padding(.horizontal, 1)
+
+                HStack(spacing: 3) {
+                    SidebarFooterIconButton(
+                        symbol: "gearshape",
+                        help: "服务与连接设置  ⌘,",
+                        accessibilityLabel: "连接设置"
+                    ) {
+                        app.showingSettings = true
+                    }
+
+                    SidebarFooterIconButton(
+                        symbol: AppAppearance(rawValue: appearance)?.symbol ?? "moon.stars.fill",
+                        help: "切换深浅色模式",
+                        accessibilityLabel: "切换深浅色模式"
+                    ) {
                         let next: AppAppearance = AppAppearance.current == .dark ? .light : .dark
                         appearance = next.rawValue
                         AppAppearance.apply(next)
-                    } label: {
-                        Image(systemName: AppAppearance(rawValue: appearance)?.symbol ?? "moon.stars.fill")
-                            .font(.system(size: 12))
                     }
-                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                    .help("切换深浅色模式")
-                    .accessibilityLabel("切换深浅色模式")
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 12)
+            .padding(5)
+            .background(Color.blogSurface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.blogStroke))
+            .padding(.horizontal, 10)
+            .padding(.bottom, 10)
         }
     }
 
@@ -653,10 +560,224 @@ private struct SidebarItemRow: View {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .strokeBorder(selected ? Color.blogPeach.opacity(0.32) : .clear)
             )
+            .animation(.snappy(duration: 0.18), value: selected)
+            .animation(.easeOut(duration: 0.12), value: hovering)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .pointingHandCursor()
         .help("\(section.rawValue)  \(shortcut)")
         .accessibilityLabel(section.rawValue)
+    }
+}
+
+private struct SidebarFooterIconButton: View {
+    let symbol: String
+    let help: String
+    let accessibilityLabel: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(hovering ? Color.blogPeach : Color.blogSecondary)
+                .frame(width: 28, height: 28)
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(
+                    hovering ? Color.blogSurfaceHover : Color.blogSlot,
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .pointingHandCursor()
+        .help(help)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct ShortcutsHelpPopover: View {
+    private struct Item: Identifiable {
+        let key: String
+        let label: String
+        var id: String { key + label }
+    }
+
+    private let groups: [(title: String, symbol: String, items: [Item])] = [
+        ("工作区导航", "sidebar.left", [
+            Item(key: "⌘1 ～ ⌘5", label: "切换仪表盘 / 留言 / 文章 / 说说 / 配置"),
+            Item(key: "⌘\\", label: "显示或收起左侧导航栏"),
+            Item(key: "⌃⌘Z", label: "窗口铺满屏幕 / 还原默认尺寸")
+        ]),
+        ("创作与同步", "square.and.pencil", [
+            Item(key: "⌘N", label: "新建本地 Markdown 文章"),
+            Item(key: "⌘⇧N", label: "新建一条说说"),
+            Item(key: "⌘S", label: "保存当前修改 / 审阅配置"),
+            Item(key: "⌘⇧P", label: "审阅并批量提交暂存文章"),
+            Item(key: "⌘R", label: "刷新当前板块状态")
+        ]),
+        ("阅读与写作布局", "rectangle.split.2x1", [
+            Item(key: "⌘E", label: "切换文章阅读 / 编辑模式"),
+            Item(key: "⌘⌥R", label: "文章阅读视图"),
+            Item(key: "⌘⌥E", label: "文章纯编辑视图"),
+            Item(key: "⌘⌥P", label: "文章编辑 + 实时预览分栏")
+        ]),
+        ("查找与设置", "gearshape", [
+            Item(key: "⌘F", label: "搜索当前列表或编辑器内查找"),
+            Item(key: "⌘,", label: "打开服务与连接设置"),
+            Item(key: "⌘/", label: "显示或隐藏此快捷键指南")
+        ])
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "keyboard")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .foregroundStyle(Color.blogPeach)
+                Text("快捷键指南")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(Color.blogText)
+                Spacer()
+            }
+
+            ForEach(Array(groups.enumerated()), id: \.offset) { idx, group in
+                if idx > 0 {
+                    HairlineDivider()
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 6) {
+                        Image(systemName: group.symbol)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Color.blogPeach)
+                        Text(group.title)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Color.blogMuted)
+                    }
+                    ForEach(group.items) { item in
+                        HStack(spacing: 12) {
+                            Text(item.label)
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(Color.blogSecondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 10)
+                            Text(item.key)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Color.blogPeachSoft)
+                                .fixedSize()
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Color.blogSlot, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(Color.blogStroke))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 376)
+        .background(Color.blogBackground)
+    }
+}
+
+// MARK: - Persistent Section Host (AppKit View Isolation + GPU CATransition)
+
+/// Hosts all 5 workspace sections inside isolated AppKit `NSHostingView` subviews so:
+/// 1. Only the active section is visible (`isHidden == false`), preventing multiple
+///    `HSplitView`s from fighting over safe-area or shifting left/up during transitions.
+/// 2. Hidden sections stay mounted in memory (zero `WKWebView` / editor / scroll reset).
+/// 3. Section switches use a WindowServer GPU `CATransition(.fade)` on the container layer
+///    after pre-laying out the incoming subview at exact bounds (zero layout jump or flash).
+private struct PersistentSectionHost: NSViewRepresentable {
+    let activeSection: WorkspaceSection
+    let app: AppModel
+
+    func makeNSView(context: Context) -> SectionContainerView {
+        SectionContainerView(app: app, initialSection: activeSection)
+    }
+
+    func updateNSView(_ container: SectionContainerView, context: Context) {
+        container.select(activeSection)
+    }
+}
+
+@MainActor
+private final class SectionContainerView: NSView {
+    private var hosts: [WorkspaceSection: NSHostingView<AnyView>] = [:]
+    private var currentSection: WorkspaceSection
+
+    init(app: AppModel, initialSection: WorkspaceSection) {
+        self.currentSection = initialSection
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.masksToBounds = true
+
+        for section in WorkspaceSection.allCases {
+            let root = AnyView(
+                Self.makeSectionView(section, app: app)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .foregroundStyle(Color.blogText)
+                    .tint(Color.blogPeach)
+            )
+            let hosting = NSHostingView(rootView: root)
+            hosting.sizingOptions = []
+            hosting.translatesAutoresizingMaskIntoConstraints = true
+            hosting.autoresizingMask = [.width, .height]
+            hosting.wantsLayer = true
+            hosting.isHidden = (section != initialSection)
+            addSubview(hosting)
+            hosts[section] = hosting
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layout() {
+        super.layout()
+        // Keep every section (including hidden ones) laid out to exact container bounds
+        // so switching never triggers a first-frame HSplitView resize or shift.
+        for hosting in hosts.values {
+            if hosting.frame != bounds {
+                hosting.frame = bounds
+            }
+        }
+    }
+
+    func select(_ section: WorkspaceSection) {
+        guard section != currentSection else { return }
+        let previous = currentSection
+        currentSection = section
+
+        guard let nextView = hosts[section] else { return }
+        if nextView.frame != bounds && bounds.width > 0 && bounds.height > 0 {
+            nextView.frame = bounds
+        }
+        nextView.layoutSubtreeIfNeeded()
+
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = 0.12
+            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer?.add(transition, forKey: "longBlogSectionFade")
+        }
+
+        hosts[previous]?.isHidden = true
+        nextView.isHidden = false
+    }
+
+    @ViewBuilder
+    private static func makeSectionView(_ sec: WorkspaceSection, app: AppModel) -> some View {
+        switch sec {
+        case .dashboard: DashboardView(model: app.dashboard)
+        case .inbox: InboxWorkspace(model: app.inbox)
+        case .posts: PostsWorkspace(model: app.posts)
+        case .memos: MemosWorkspace(model: app.memos)
+        case .configuration: ConfigurationWorkspace(model: app.configuration)
+        }
     }
 }

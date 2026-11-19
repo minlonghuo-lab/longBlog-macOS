@@ -8,6 +8,7 @@ import PDFKit
 import ImageIO
 
 struct MemosWorkspace: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: MemosModel
     @ObservedObject private var app = AppModel.shared
 
@@ -30,7 +31,6 @@ struct MemosWorkspace: View {
                     }
                 }
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
-                .animation(.easeInOut(duration: 0.18), value: model.archived)
                 .overlay(alignment: .bottom) { OperationStatus(model: model).padding(.bottom, 16) }
             }
         }
@@ -43,6 +43,7 @@ struct MemosWorkspace: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 BlogSegmentedControl(
+                    title: "说说列表",
                     options: [
                         SegmentedOption(value: false, label: "时间线"),
                         SegmentedOption(value: true, label: "已归档")
@@ -97,7 +98,7 @@ struct MemosWorkspace: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .animation(.easeInOut(duration: 0.18), value: model.archived)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: model.archived)
 
             HairlineDivider()
 
@@ -121,6 +122,7 @@ struct MemosWorkspace: View {
                 Spacer()
                 Button("验证 / 刷新") { model.refresh() }
                     .buttonStyle(.plain)
+                    .pointingHandCursor(!model.busy)
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(Color.blogPeach)
                     .disabled(model.busy)
@@ -498,6 +500,7 @@ private struct MemoAttachmentCard: View {
                 )
             }
             .buttonStyle(.plain)
+            .pointingHandCursor()
             .help("点击预览或播放：\(filename)")
 
             if canRemove {
@@ -508,6 +511,7 @@ private struct MemoAttachmentCard: View {
                         .foregroundStyle(Color.white, Color.black.opacity(0.65))
                 }
                 .buttonStyle(.plain)
+                .pointingHandCursor()
                 .padding(5)
                 .accessibilityLabel("移除附件关联，不删除服务端文件")
             }
@@ -575,6 +579,7 @@ private struct MemoEditorView: View {
                     .font(.system(size: 12.5))
                     .foregroundStyle(Color.blogMuted)
                 BlogSegmentedControl(
+                    title: "编辑模式",
                     options: [
                         SegmentedOption(value: false, label: "编辑"),
                         SegmentedOption(value: true, label: "预览")
@@ -585,40 +590,45 @@ private struct MemoEditorView: View {
             }
 
             // Rounded solid editor/preview container matching chosen-memos.png
-            if preview {
-                ReaderView(markdown: model.content)
-                    .background(Color(nsColor: .lb(light: .rgb(246, 239, 230), dark: .rgb(37, 30, 26))))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.blogStroke))
-                    .transaction { $0.animation = nil }
-            } else {
-                VStack(spacing: 0) {
-                    HStack {
-                        MarkdownToolbar(controller: controller, compact: true, attach: isArchived ? nil : { importing = true })
-                        Spacer()
-                        Text("\(TextStats.words(model.content)) 字")
-                            .font(.system(size: 11.5).monospacedDigit())
-                            .foregroundStyle(Color.blogMuted)
+            ZStack {
+                if preview {
+                    ReaderView(markdown: model.content)
+                        .background(Color(nsColor: .lb(light: .rgb(246, 239, 230), dark: .rgb(37, 30, 26))))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.blogStroke))
+                        .transaction { $0.animation = nil }
+                        .transition(.opacity)
+                } else {
+                    VStack(spacing: 0) {
+                        HStack {
+                            MarkdownToolbar(controller: controller, compact: true, attach: isArchived ? nil : { importing = true })
+                            Spacer()
+                            Text("\(TextStats.words(model.content)) 字")
+                                .font(.system(size: 11.5).monospacedDigit())
+                                .foregroundStyle(Color.blogMuted)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.blogSurface.opacity(0.5))
+
+                        HairlineDivider()
+
+                        MarkdownTextEditor(
+                            text: $model.content,
+                            documentID: model.selectedID ?? "new-memo",
+                            controller: controller,
+                            editable: !(isArchived || model.busy),
+                            onImportFiles: isArchived ? nil : { model.importFiles($0) }
+                        )
+                        .clipped()
+                        .transaction { $0.animation = nil }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Color.blogSurface.opacity(0.5))
-
-                    HairlineDivider()
-
-                    MarkdownTextEditor(
-                        text: $model.content,
-                        documentID: model.selectedID ?? "new-memo",
-                        controller: controller,
-                        editable: !(isArchived || model.busy),
-                        onImportFiles: isArchived ? nil : { model.importFiles($0) }
-                    )
-                    .clipped()
-                    .transaction { $0.animation = nil }
+                    .background(Color.blogEditor, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.blogStroke))
+                    .transition(.opacity)
                 }
-                .background(Color.blogEditor, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Color.blogStroke))
             }
+            .animation(.smooth(duration: 0.18), value: preview)
 
             if !model.resources.isEmpty {
                 attachmentsGallery
@@ -631,6 +641,7 @@ private struct MemoEditorView: View {
                         .font(.system(size: 12.5))
                         .foregroundStyle(Color.blogMuted)
                     BlogSegmentedControl(
+                        title: "可见性",
                         options: [
                             SegmentedOption(value: "PUBLIC", label: "公开"),
                             SegmentedOption(value: "PROTECTED", label: "登录可见"),
@@ -654,6 +665,7 @@ private struct MemoEditorView: View {
                         .foregroundStyle(Color.blogMuted)
                     }
                     .buttonStyle(.plain)
+                    .pointingHandCursor(!model.busy)
                     .disabled(model.busy)
                 }
             }

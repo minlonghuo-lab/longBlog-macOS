@@ -18,7 +18,7 @@ struct LongBlogApp: App {
                 Button("新建文章") { post("newArticle") }.keyboardShortcut("n")
                 Button("写说说") { post("newMemo") }.keyboardShortcut("n", modifiers: [.command, .shift])
                 Divider()
-                Button("命令面板 / 快速跳转…") { post("commandPalette") }.keyboardShortcut("p")
+                Button("快捷键帮助…") { post("shortcutsHelp") }.keyboardShortcut("/", modifiers: .command)
             }
             CommandGroup(after: .saveItem) {
                 Button("保存") { post("save") }.keyboardShortcut("s")
@@ -27,7 +27,6 @@ struct LongBlogApp: App {
             CommandGroup(after: .textEditing) {
                 Button("切换阅读 / 编辑") { post("editArticle") }.keyboardShortcut("e")
                 Button("搜索") { post("search") }.keyboardShortcut("f")
-                Button("专注写作模式") { post("toggleFocus") }.keyboardShortcut("f", modifiers: [.command, .shift])
             }
             CommandMenu("格式") {
                 ForEach(MarkdownAction.allCases) { action in
@@ -35,8 +34,6 @@ struct LongBlogApp: App {
                         guard !AppModel.activeTextInputHasMarkedText else { return }
                         if let editor = MarkdownEditorController.focused {
                             editor.apply(action)
-                        } else if action == .link {
-                            post("commandPalette")
                         }
                     }
                     if let s = action.shortcut { button.keyboardShortcut(s.key, modifiers: s.modifiers) } else { button }
@@ -44,7 +41,8 @@ struct LongBlogApp: App {
                 }
             }
             CommandGroup(before: .toolbar) {
-                Button("命令面板…") { post("commandPalette") }
+                Button("快捷键帮助…") { post("shortcutsHelp") }
+                Button("铺满屏幕 / 还原窗口尺寸") { post("toggleWindowZoom") }.keyboardShortcut("z", modifiers: [.command, .control])
                 Button("显示 / 隐藏侧边栏") { post("toggleSidebar") }.keyboardShortcut("\\", modifiers: .command)
                 Divider()
                 Button("仪表盘") { post("nav.dashboard") }.keyboardShortcut("1")
@@ -78,6 +76,7 @@ struct LongBlogApp: App {
 final class LongBlogAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private(set) var workspaceWindow: NSWindow?
     private var suppressNextInboxFocusReload = false
+    private var savedRestoreFrame: NSRect?
     @MainActor let menuBar = MenuBarController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -118,15 +117,62 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         if args.contains("--smoke-test") && args.contains("--smoke-palette") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                AppModel.shared.showingCommandPalette = true
+                AppModel.shared.showingShortcutsHelp = true
+            }
+        }
+        if args.contains("--smoke-test") && args.contains("--smoke-zoom") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                self.toggleWindowZoom()
+            }
+        }
+        if args.contains("--smoke-test") && args.contains("--smoke-switch") {
+            let steps: [(delay: Double, section: WorkspaceSection)] = [
+                (1.1, .inbox),
+                (1.85, .posts),
+                (2.65, .memos),
+                (3.4, .configuration),
+                (4.15, .dashboard)
+            ]
+            for step in steps {
+                DispatchQueue.main.asyncAfter(deadline: .now() + step.delay) {
+                    self.simulateSidebarClick(target: step.section)
+                }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.2) {
+                NSApp.terminate(nil)
             }
         }
         NSApp.activate(ignoringOtherApps: true)
-        if args.contains("--smoke-test") {
+        if args.contains("--smoke-test") && !args.contains("--smoke-switch") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) {
                 self.captureSmokeWindow()
             }
         }
+    }
+
+    @MainActor
+    private func simulateSidebarClick(target: WorkspaceSection) {
+        guard let window = workspaceWindow else { return }
+        let idx = WorkspaceSection.allCases.firstIndex(of: target) ?? 0
+        // Locate sidebar row in window coordinates (top-down y ≈ 158 + idx * 38)
+        let contentHeight = window.contentLayoutRect.height
+        let pt = NSPoint(x: 112, y: max(40, contentHeight - CGFloat(158 + idx * 38)))
+        let now = ProcessInfo.processInfo.systemUptime
+        if let down = NSEvent.mouseEvent(
+            with: .leftMouseDown, location: pt, modifierFlags: [], timestamp: now,
+            windowNumber: window.windowNumber, context: nil, eventNumber: idx * 2 + 1, clickCount: 1, pressure: 1
+        ), let up = NSEvent.mouseEvent(
+            with: .leftMouseUp, location: pt, modifierFlags: [], timestamp: now + 0.02,
+            windowNumber: window.windowNumber, context: nil, eventNumber: idx * 2 + 2, clickCount: 1, pressure: 0
+        ) {
+            window.sendEvent(down)
+            window.sendEvent(up)
+        }
+        // Fallback if window metrics differ slightly from default sidebar row spacing
+        if AppModel.shared.section != target {
+            AppModel.shared.navigate(target)
+        }
+        fputs("SMOKE_SWITCH \(target.rawValue) active=\(AppModel.shared.section.rawValue)\n", stderr)
     }
 
     @MainActor
@@ -137,14 +183,18 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                                   backing: .buffered, defer: false)
             window.title = "longBlog"
             window.titleVisibility = .visible
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
             window.toolbarStyle = .unified
             window.isReleasedWhenClosed = false
             window.isRestorable = false
             window.tabbingMode = .disallowed
             window.minSize = NSSize(width: 1020, height: 660)
+            window.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            window.contentMaxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
             window.backgroundColor = .lbBackground
             let host = NSHostingController(rootView: RootView())
-            host.preferredContentSize = NSSize(width: 1280, height: 800)
+            host.sizingOptions = [.minSize]
             window.contentViewController = host
             window.setContentSize(NSSize(width: 1280, height: 800))
             window.center()
@@ -156,8 +206,96 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         }
         if !reloadInboxOnFocus { suppressNextInboxFocusReload = true }
         workspaceWindow?.makeKeyAndOrderFront(nil)
+        suppressTitlebarHoverHighlight(for: workspaceWindow)
+        updateWindowZoomState()
         NSApp.activate(ignoringOtherApps: true)
         if workspaceWindow?.isKeyWindow == true { suppressNextInboxFocusReload = false }
+    }
+
+    @MainActor
+    func suppressTitlebarHoverHighlight(for targetWindow: NSWindow? = nil) {
+        guard let window = targetWindow ?? workspaceWindow else { return }
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        func disablePockets(in view: NSView) {
+            let cls = NSStringFromClass(type(of: view))
+            if cls.contains("NSTitlebarBackgroundView")
+                || cls.contains("NSScrollPocket")
+                || cls.contains("_NSTitlebarDecorationView") {
+                view.isHidden = true
+                view.alphaValue = 0
+                for area in view.trackingAreas {
+                    view.removeTrackingArea(area)
+                }
+            } else if cls.contains("NSToolbarTitleView") {
+                for area in view.trackingAreas {
+                    view.removeTrackingArea(area)
+                }
+            }
+            for sub in view.subviews {
+                disablePockets(in: sub)
+            }
+        }
+        if let root = window.contentView?.superview {
+            disablePockets(in: root)
+        }
+        DispatchQueue.main.async {
+            if let root = window.contentView?.superview {
+                disablePockets(in: root)
+            }
+        }
+    }
+
+    @MainActor
+    func toggleWindowZoom() {
+        guard let window = workspaceWindow,
+              let screen = window.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let current = window.frame
+        let isCurrentlyZoomed = abs(current.width - visible.width) < 12
+            && abs(current.height - visible.height) < 12
+        if isCurrentlyZoomed {
+            let w = min(1280, visible.width)
+            let h = min(800, visible.height)
+            let fallback = NSRect(
+                x: visible.midX - w / 2,
+                y: visible.midY - h / 2,
+                width: w,
+                height: h
+            )
+            let target = savedRestoreFrame ?? fallback
+            window.setFrame(target, display: true, animate: true)
+            AppModel.shared.isWindowZoomed = false
+        } else {
+            savedRestoreFrame = current
+            window.setFrame(visible, display: true, animate: true)
+            AppModel.shared.isWindowZoomed = true
+        }
+        suppressTitlebarHoverHighlight(for: window)
+    }
+
+    @MainActor
+    func updateWindowZoomState() {
+        guard let window = workspaceWindow,
+              let screen = window.screen ?? NSScreen.main else { return }
+        let visible = screen.visibleFrame
+        let current = window.frame
+        let zoomed = abs(current.width - visible.width) < 12
+            && abs(current.height - visible.height) < 12
+        if AppModel.shared.isWindowZoomed != zoomed {
+            AppModel.shared.isWindowZoomed = zoomed
+        }
+    }
+
+    func windowWillUseStandardFrame(_ window: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
+        (window.screen ?? NSScreen.main)?.visibleFrame ?? newFrame
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            updateWindowZoomState()
+            suppressTitlebarHoverHighlight()
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -173,6 +311,10 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     func windowDidBecomeKey(_ notification: Notification) {
         let reload = !suppressNextInboxFocusReload
         suppressNextInboxFocusReload = false
+        MainActor.assumeIsolated {
+            suppressTitlebarHoverHighlight()
+            updateWindowZoomState()
+        }
         AppModel.shared.inbox.workspaceFocusChanged(true, reload: reload)
     }
 
