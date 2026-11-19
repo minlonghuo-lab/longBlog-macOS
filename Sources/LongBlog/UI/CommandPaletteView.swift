@@ -297,6 +297,7 @@ private struct PaletteRow: View {
 
 private struct CommandPaletteSurfaceModifier: ViewModifier {
     func body(content: Content) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             content
                 .background(Color.blogBackground.opacity(0.28), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -316,5 +317,19 @@ private struct CommandPaletteSurfaceModifier: ViewModifier {
                         .strokeBorder(Color.blogPeach.opacity(0.35), lineWidth: 1)
                 )
         }
+        #else
+        content
+            .background {
+                ZStack {
+                    VisualEffectBackground(material: .popover, blendingMode: .withinWindow)
+                    Color.blogSidebar.opacity(0.94)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.blogPeach.opacity(0.35), lineWidth: 1)
+            )
+        #endif
     }
 }

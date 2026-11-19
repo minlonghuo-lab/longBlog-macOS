@@ -128,6 +128,7 @@ struct BlogGlassGroup<Content: View>: View {
         self.content = content()
     }
     var body: some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             GlassEffectContainer(spacing: spacing) {
                 HStack(spacing: spacing) {
@@ -139,6 +140,11 @@ struct BlogGlassGroup<Content: View>: View {
                 content
             }
         }
+        #else
+        HStack(spacing: spacing) {
+            content
+        }
+        #endif
     }
 }
 
@@ -154,6 +160,7 @@ extension View {
         fallbackFill: Color = .blogSurface,
         fallbackStroke: Color = .blogStroke
     ) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             let baseGlass: Glass = {
                 var g = Glass.regular
@@ -177,6 +184,17 @@ extension View {
                     .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).strokeBorder(fallbackStroke))
             }
         }
+        #else
+        if capsule {
+            self
+                .background(fallbackFill, in: Capsule())
+                .overlay(Capsule().strokeBorder(fallbackStroke))
+        } else {
+            self
+                .background(fallbackFill, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).strokeBorder(fallbackStroke))
+        }
+        #endif
     }
 }
 
@@ -186,6 +204,7 @@ extension View {
 struct BlogPrimaryButtonStyle: PrimitiveButtonStyle {
     var compact = false
     func makeBody(configuration: Configuration) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             Button(role: configuration.role, action: configuration.trigger) {
                 configuration.label
@@ -200,6 +219,10 @@ struct BlogPrimaryButtonStyle: PrimitiveButtonStyle {
             Button(configuration)
                 .buttonStyle(LegacyPrimaryButtonStyle(compact: compact))
         }
+        #else
+        Button(configuration)
+            .buttonStyle(LegacyPrimaryButtonStyle(compact: compact))
+        #endif
     }
 }
 
@@ -238,6 +261,7 @@ struct BlogSecondaryButtonStyle: PrimitiveButtonStyle {
     var compact = false
     var destructive = false
     func makeBody(configuration: Configuration) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             Button(role: configuration.role, action: configuration.trigger) {
                 configuration.label
@@ -252,6 +276,10 @@ struct BlogSecondaryButtonStyle: PrimitiveButtonStyle {
             Button(configuration)
                 .buttonStyle(LegacySecondaryButtonStyle(compact: compact, destructive: destructive))
         }
+        #else
+        Button(configuration)
+            .buttonStyle(LegacySecondaryButtonStyle(compact: compact, destructive: destructive))
+        #endif
     }
 }
 
@@ -529,6 +557,7 @@ struct BlogSegmentedControl<Value: Hashable>: View {
 
     @ViewBuilder
     private var lensView: some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             // Pure GPU-accelerated Liquid Glass lens with no software drop-shadow re-rasterization per frame.
             Capsule()
@@ -539,6 +568,11 @@ struct BlogSegmentedControl<Value: Hashable>: View {
                 .fill(onLightSurface ? Color.white.opacity(0.88) : Color.blogSlotActive)
                 .overlay(Capsule().strokeBorder(Color.blogStroke.opacity(0.75)))
         }
+        #else
+        Capsule()
+            .fill(onLightSurface ? Color.white.opacity(0.88) : Color.blogSlotActive)
+            .overlay(Capsule().strokeBorder(Color.blogStroke.opacity(0.75)))
+        #endif
     }
 
     private func labelColor(active: Bool) -> Color {
@@ -786,6 +820,7 @@ struct OperationStatus: View {
 private extension View {
     @ViewBuilder
     func toastBackground(_ tint: Color) -> some View {
+        #if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             padding(.horizontal, 14)
                 .padding(.vertical, 9.5)
@@ -799,6 +834,14 @@ private extension View {
                 .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
         }
+        #else
+        padding(.horizontal, 13)
+            .padding(.vertical, 9)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(tint.opacity(0.35)))
+            .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        #endif
     }
 }
 

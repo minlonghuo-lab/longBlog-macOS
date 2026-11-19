@@ -490,6 +490,7 @@ private struct PostDetailView: View {
                 }
 
                 Group {
+                    #if compiler(>=6.2)
                     if #available(macOS 26.0, *) {
                         Menu {
                             stagingMenuItems
@@ -516,6 +517,22 @@ private struct PostDetailView: View {
                         }
                         .menuStyle(.borderlessButton)
                     }
+                    #else
+                    Menu {
+                        stagingMenuItems
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "tray.and.arrow.up")
+                            Text("暂存")
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.blogText.opacity(0.92))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 5.5)
+                        .blogGlassControl(capsule: true, interactive: true)
+                    }
+                    .menuStyle(.borderlessButton)
+                    #endif
                 }
                 .fixedSize()
                 .disabled(mutatingBusy)
