@@ -4,16 +4,18 @@
 
 面向 longBlog 维护者的**原生 macOS 客户端**。不是把网页管理后台套壳，也不是放大的 iPhone 界面：采用 **SwiftUI + AppKit** 重建桌面交互，并以 **Objective-C** 保留 iOS 客户端经过迭代的业务逻辑。
 
-> **0.1.0 预览版**：最低 macOS 14；Apple Silicon / Intel 通用 DMG。编译、原生 fixture 和窗口启动由 GitHub Actions 验证，但不表示所有真实服务、目录权限和交互均已在用户的 Mac 验收。安装包只有 ad-hoc 签名，没有 Developer ID 或 Apple 公证。
+> **0.2.0 预览版**：最低 macOS 14（macOS 26+ 自动启用原生 Liquid Glass 动态液态玻璃材质与原生 `NavigationSplitView` 悬浮侧栏，macOS 14–15 自动回退暖棕半透明材质）；Apple Silicon / Intel 通用 DMG。编译、原生 fixture 和窗口启动由 GitHub Actions 与本地套件验证；安装包当前为 ad-hoc 签名，未包含 Developer ID 签名或 Apple 公证。
 
 - [安装包与预览版](https://github.com/minlonghuo-lab/longBlog-macOS/releases)
 - [Actions 构建及产物](https://github.com/minlonghuo-lab/longBlog-macOS/actions/workflows/macos.yml)
 - [安装和首次配置](docs/INSTALL.md)
-- iOS 来源：[minlonghuo-lab/longBlog-iOS](https://github.com/minlonghuo-lab/longBlog-iOS)，业务基线 `6245c80`（1.0.1 build 2）
+- iOS 来源：[minlonghuo-lab/longBlog-iOS](https://github.com/minlonghuo-lab/longBlog-iOS)（与 iOS 本地优先缓存、暂存撤销与凭据策略对齐）
+
+打开下载的 DMG，将 `longBlog.app` 拖入「应用程序」，然后从「应用程序」启动。首次使用可按 `⌘,` 打开连接设置。
 
 ## 界面与技术路线
 
-参考用户提供的 [macOS 设计方案](docs/design/README.md)，选定方案一：暖棕底色、桃色强调、原生半透明材质、230pt 侧边栏、列表/详情分栏及卡片仪表盘。设计稿保存于 `docs/design/`；其中截图是**参考稿**，不是本程序实际运行截图，示例统计不会硬编码成在线状态。
+参考用户提供的 [macOS 设计方案](docs/design/README.md)，选定方案一：暖棕底色、暖桃强调、原生液态玻璃/半透明控制层 + 实底高对比阅读与卡片层、可平滑收起的原生侧边栏、列表/详情/预览三栏工作台及卡片仪表盘。设计稿保存于 `docs/design/`；其中截图是**参考稿**，示例统计不会硬编码成在线状态。
 
 ![界面设计参考，非实际运行截图](docs/design/images/scheme1-glass-dashboard.png)
 
@@ -21,47 +23,52 @@
 
 | 层 | 技术 | 理由 |
 | --- | --- | --- |
-| 窗口、侧边栏、表单、菜单 | SwiftUI + AppKit | 原生 Mac 交互、文件选择、快捷键与可调整分栏 |
-| 文章、GitHub、dotenv、Memos、留言 | Objective-C + Foundation | 复用原有协议与事务防护，避免重新发明同步逻辑 |
-| 阅读与图表 | WKWebView + 随包离线资源 | 保留 Markdown/KaTeX/Mermaid；页面不获取服务凭据 |
-| AI 写作辅助 | Swift concurrency + URLSession | 流式预览、取消、超时和大小上限；手动应用 |
-| 打包 | Apple clang / swiftc / lipo / hdiutil | 不依赖第三方工程生成器，直接产出通用 `.app` 与 DMG |
+| 窗口、导航、工具栏、表单、菜单栏 | SwiftUI + AppKit (`NSHostingController` / `NavigationSplitView`) | 原生 Mac 统一工具栏、丝滑分栏收起动画、菜单栏快捷面板与全局命令面板 |
+| 交互控件与材质分层 | macOS 26+ 原生 Liquid Glass + macOS 14–15 暖色回退 | 顶栏、主次按钮（`.glassProminent` / `.glass`）、可按住拖动玻璃分段滑块、搜索框、命令面板与浮层使用原生玻璃；正文、编辑器、行号栏、缩略图与卡片保持实底 |
+| 文章、GitHub、dotenv、Memos、留言 | Objective-C + Foundation | 复用原有协议、本地优先缓存与事务防护，通过 macOS 钥匙串保存令牌，并静默读取可访问的凭据 |
+| 编辑器与离线阅读器 | AppKit `NSTextView` + 常驻复用 `WKWebView` | 行号标尺严格裁切、增量语法高亮；阅读器首帧同步注入主题、零白闪切换、离线渲染 Markdown/KaTeX/Mermaid |
+| AI 写作辅助 | Swift concurrency + URLSession | 流式预览、取消、超时和大小上限；手动核对后应用 |
+| 打包 | Apple clang / swiftc / lipo / hdiutil | 不依赖第三方工程生成器，直接产出 `arm64 + x86_64` 通用 `.app` 与 DMG |
 
-原生材质在 macOS 14+ 可用；设计里的“Tahoe 玻璃风”是视觉方向，不承诺在旧系统提供只有新系统才有的 Liquid Glass API。
-
-## 五个工作区
+## 五个工作区与核心能力
 
 ### 仪表盘
 
-文章、公开说说、留言和友链汇总；读取提交、线上构建、镜像心跳、证书信息。缺少配置或请求失败时显示未配置/错误，不把示例数字当实时数据。线上发布仍依赖外部站点流水线。
+文章、公开说说、留言和友链汇总；读取最近提交、线上构建、说说镜像心跳与 HTTPS 证书有效期。支持本地快照秒开与后台静默刷新，保存连接设置后自动重拉；缺少配置或请求失败时如实显示未配置/错误，不把示例数字当实时数据。
 
 ### 留言
 
-longBlog 终端留言会话、消息及回复、未读状态和归档相关读取。不是通用邮件客户端；macOS 应用内刷新不等于常驻后台或实时服务端推送。
+longBlog 终端留言会话、消息及回复、未读状态和归档浏览。「进行中 / 归档记录」支持双列表内存缓存与平滑切页；回复发送前均经显式确认。
 
 ### 文章
 
-本地 Markdown 包、列表/详情/编辑/离线预览、文件附件、草稿和已发布筛选、从 GitHub 同步。
+本地 Markdown 包、列表/详情/编辑/分栏实时预览、专注写作模式（`⌘⇧F`）、文件附件、草稿和已发布筛选、从 GitHub 同步。
 
 - 复用 `LBMdStore`：按篇目录、附件映射、同步基线和未决事务。
-- 暂存发布/下架后审阅，一次提交多个变化；Git ref 更新为 `force:false`。
+- 暂存发布/下架后集中审阅，一次原子提交多个变化；Git ref 更新为 `force:false`。
+- **安全删除边界**：仅本地草稿（且不在待提交队列中）允许二次确认后删除并清理文章目录与附件；已发布文章必须先「暂存下架」并提交到远端转为草稿后才可删除。
 - 冲突、账号/仓库变更和结果不明时保留恢复信息，不强推、不自动重放发布。
-- 撤销是针对确认时冻结的本地待提交选择，不是远端历史回滚；恢复前核验与备份。
-- 实际内容快照决定是否修改，切换预览或移动光标不当成正文变化。
+- 实际内容快照决定脏状态，切换阅读/编辑/分栏预览或移动光标不误标为未保存。
+- 阅读器常驻复用同一文档，支持「暖纸 / 深色 / 自动」纸色即时切换，切篇与切板块零白闪。
 
-默认本地目录位于独立 Application Support 路径，也可选择外部文件夹。首次同步前请备份；客户端操作会真正修改所选目录与已配置的远端内容仓库。
+默认本地目录位于独立 Application Support 路径，也可选择外部文件夹（如 iCloud `longNotes`）。首次同步前请备份；客户端操作会真正修改所选目录与已配置的远端内容仓库。
 
 ### 说说
 
-复用 **legacy Memos REST** 身份验证、时间线、编辑、可见性、置顶/归档与资源接口。私有缓存按账号隔离。支持范围以实现的 `/api/v1/user/me`、`/api/v1/memo`、数字 ID、`rowStatus` 和 `resourceList` 为准，不能据此宣称兼容任意最新版 Memos。
+复用 **legacy Memos REST** 身份验证、时间线/已归档切换、编辑、可见性、置顶/归档/恢复与永久删除及资源接口。私有缓存按账号隔离：
+
+- **全量附件本地预取与多媒体预览**：同步列表后在后台下载附件原件，单个文件上限为 32 MiB，超限或空间不足时会报告缓存失败。时间线卡片展示本地降采样实底缩略图（图片、视频首帧、PDF 首页），详情区提供实底视觉画廊与缓存进度，点击可在内置玻璃浮层中缩放看图、多图切换、播放音视频或使用 Quick Look 预览文档。
+- **两段式安全删除**：「时间线」说说先归档，「已归档」说说支持二次确认后从服务端永久删除并清理本地缓存。
+- 支持范围以实现的 `/api/v1/user/me`、`/api/v1/memo`、数字 ID、`rowStatus` 和 `resourceList` 为准。
 
 ### 站点配置
 
-从 GitHub 读取 `.env`，按分组编辑，标识修改项，并显式确认后提交到站点内容仓库 `main`。未修改行保持原有文本；写入配置与部署上线是两件事。
+从 GitHub 读取 `.env`，按分组编辑、关键词筛选、标识修改项，基于基准 SHA 校验冲突并在显式确认后提交到站点内容仓库 `main`。未修改行与注释保持原有字节；写入配置与站点部署上线相互独立。
 
-### AI 辅助
+### AI 辅助、命令面板与菜单栏面板
 
-文章编辑器内生成/润色摘要、润色正文、从文末续写。配置自己的 HTTPS OpenAI-compatible 接口与模型；API Key 保存 Keychain。请求前明确告知发送内容，结果预览后手动应用，不自动发布。暂不提供与 iOS 文本选区完全相同的就地润色/光标续写体验。
+- **AI 写作辅助**：文章编辑器内生成/润色摘要、润色正文、从文末续写。配置自己的 HTTPS OpenAI-compatible 接口与模型；请求前明确告知发送内容，结果预览后手动应用。
+- **全局命令面板（`⌘K` / `⌘P`）与菜单栏快捷面板**：一键跳转任意工作区、搜索本地文章、切换深浅色外观、查看未读留言与待提交计数或快速新建草稿。
 
 具体已实现路径与移植差异见 [UI 移植记录](docs/UI-PORT.md)、[业务层移植记录](docs/CORE-PORT.md)、[阅读器边界](docs/READER-PORT.md)。
 
@@ -106,20 +113,20 @@ longBlog 终端留言会话、消息及回复、未读状态和归档相关读�
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 bash scripts/build.sh
+bash scripts/test_reader.sh
 open build/longBlog.app
 ```
 
-输出 `build/longBlog-0.2.0-universal.dmg` 与 `build/SHA256SUMS.txt`。可设置非秘密参数 `VERSION`、`GITHUB_RUN_NUMBER`；构建无需任何后端 Token、签名证书或 Apple ID。
+`scripts/build.sh` 会自动执行双架构编译、`CoreFixtures`（180 项业务与缓存断言）、`EditorFixtures`（5 万字语法高亮基准）与 `AIEndpointFixtures`（19 项离线边界校验），并输出 `build/longBlog-0.2.0-universal.dmg` 与 `build/SHA256SUMS.txt`。可设置非秘密参数 `VERSION`、`GITHUB_RUN_NUMBER`；构建无需任何后端 Token、签名证书或 Apple ID。
 
 ## 安全与验收边界
 
-- 独立 Bundle ID：`com.huowenlong.longblog.macos`；独立 Keychain 命名空间，不读取 iOS 沙盒或共享手机凭据。
-- 当前为非 App Sandbox 桌面应用；选择目录不是隔离整个进程权限的安全沙盒。阅读器仍单独执行路径/导航限制。
-- GitHub Token、Owner Key、Memos Token、AI Key 不存进普通配置、源码或构建日志。
+- 独立 Bundle ID：`com.huowenlong.longblog.macos`；令牌保存在 macOS 登录钥匙串中。应用静默读写凭据。若钥匙串已锁定，需先解锁；若升级后旧项目无法读取，可在连接设置重新填写对应令牌。
+- 当前为非 App Sandbox 桌面应用；选择目录不是隔离整个进程权限的安全沙盒。阅读器仍单独执行路径/导航限制（`O_NOFOLLOW`、符号链接逃逸拦截与严格 CSP）。
+- GitHub Token、Owner Key、Memos Token、AI Key 不存进普通 `UserDefaults`、源码或构建日志。
 - WKWebView 使用临时数据存储、CSP、内容清洗及受控资源 scheme；外部 HTTPS 链接只在用户点击时交给系统。
-- 本仓库不包含真实服务凭据、后端、自动部署服务或 Apple SDK。
-- CI 不是端到端私人服务验收：没有使用用户数据执行文章发布、留言回复、Memos 编辑/归档或 `.env` 提交。
-- 尚需真实 Mac 验收：Gatekeeper/Keychain、授权文件夹重启恢复、中文输入法/撤销、窄窗口/深浅色/VoiceOver、长文图表与附件、真实网络冲突恢复。
+- 本仓库不包含真实服务凭据、后端、自动部署服务或第三方远程脚本。
+- CI 不是端到端私人服务验收：没有使用用户数据执行文章发布、留言回复、Memos 编辑/删除或 `.env` 提交。
 
 ## 来源与许可
 

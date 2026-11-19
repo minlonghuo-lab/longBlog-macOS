@@ -70,74 +70,15 @@ struct RootView: View {
                             #endif
                         }
 
-                        ToolbarItem(placement: .primaryAction) {
-                            Button {
-                                app.refresh()
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                            }
-                            .help("刷新当前板块  ⌘R")
-                            .accessibilityLabel("刷新当前板块")
-                            .disabled(busy)
-                        }
-
                         #if compiler(>=6.2)
                         if #available(macOS 26.0, *) {
-                            ToolbarSpacer(.fixed, placement: .primaryAction)
-                        }
-                        #endif
-
-                        if app.section == .posts && app.focusMode {
-                            #if compiler(>=6.2)
-                            if #available(macOS 26.0, *) {
-                                ToolbarItem(placement: .primaryAction) {
-                                    Button { posts.save() } label: {
-                                        Text("保存")
-                                    }
-                                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                                    .disabled(!posts.isDirty || posts.busy)
-                                    .help("保存到本地  ⌘S")
-                                }
+                            ToolbarItem(placement: .primaryAction) { toolbarActions }
                                 .sharedBackgroundVisibility(.hidden)
-
-                                ToolbarSpacer(.fixed, placement: .primaryAction)
-                            } else {
-                                ToolbarItem(placement: .primaryAction) {
-                                    Button { posts.save() } label: {
-                                        Text("保存")
-                                    }
-                                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                                    .disabled(!posts.isDirty || posts.busy)
-                                    .help("保存到本地  ⌘S")
-                                }
-                            }
-                            #else
-                            ToolbarItem(placement: .primaryAction) {
-                                Button { posts.save() } label: {
-                                    Text("保存")
-                                }
-                                .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                                .disabled(!posts.isDirty || posts.busy)
-                                .help("保存到本地  ⌘S")
-                            }
-                            #endif
-                        }
-
-                        #if compiler(>=6.2)
-                        if #available(macOS 26.0, *) {
-                            ToolbarItem(placement: .primaryAction) {
-                                primaryAction
-                            }
-                            .sharedBackgroundVisibility(.hidden)
                         } else {
-                            ToolbarItem(placement: .primaryAction) {
-                                primaryAction
-                            }
+                            ToolbarItem(placement: .primaryAction) { toolbarActions }
                         }
                         #else
-                        ToolbarItem(placement: .primaryAction) {
-                            primaryAction
-                        }
+                        ToolbarItem(placement: .primaryAction) { toolbarActions }
                         #endif
                     }
             }
@@ -317,23 +258,22 @@ struct RootView: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(Color.blogMuted)
                     Text("搜索或命令…")
-                        .font(.system(size: 12.5))
+                        .font(.system(size: 13))
                         .foregroundStyle(Color.blogMuted)
                         .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Text("⌘K")
                         .font(.system(size: 11, weight: .medium, design: .rounded))
                         .foregroundStyle(Color.blogMuted.opacity(0.75))
-                        .padding(.leading, 24)
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                .frame(width: 224, height: WorkspaceToolbarMetrics.height)
                 .blogGlassControl(capsule: true, interactive: true, fallbackFill: .blogField)
             }
             .buttonStyle(.plain)
-            .fixedSize()
             .help("打开快速搜索与命令面板  ⌘K / ⌘F")
 
         case .posts:
@@ -345,27 +285,27 @@ struct RootView: View {
                         SegmentedOption(value: "已发布", label: "已发布", count: posts.loaded ? posts.publishedCount : nil)
                     ],
                     selection: $posts.filter,
-                    compact: true
+                    compact: true, toolbarSized: true
                 )
             }
 
         case .inbox:
-            SearchField(prompt: "搜索会话或留言", text: search, focused: $searchFocused)
-                .frame(width: 215)
+            SearchField(prompt: "搜索会话或留言", text: search, focused: $searchFocused, toolbarSized: true)
+                .frame(width: 224)
                 .accessibilityLabel("搜索当前板块")
 
         case .memos:
-            SearchField(prompt: "搜索说说", text: search, focused: $searchFocused) {
+            SearchField(prompt: "搜索说说", text: search, focused: $searchFocused, toolbarSized: true) {
                 memos.load()
             }
-            .frame(width: 215)
+            .frame(width: 224)
             .accessibilityLabel("搜索当前板块")
 
         case .configuration:
             HStack(spacing: 8) {
                 if !configuration.baseline.isEmpty {
-                    SearchField(prompt: "筛选配置项", text: search, focused: $searchFocused)
-                        .frame(width: 195)
+                    SearchField(prompt: "筛选配置项", text: search, focused: $searchFocused, toolbarSized: true)
+                        .frame(width: 224)
                         .accessibilityLabel("搜索配置项")
                 }
                 if configuration.isDirty {
@@ -373,6 +313,25 @@ struct RootView: View {
                 }
             }
         }
+    }
+
+    private var toolbarActions: some View {
+        HStack(spacing: 10) {
+            Button { app.refresh() } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(ToolbarIconButtonStyle())
+                .accessibilityLabel("刷新当前板块")
+                .help("刷新当前板块  ⌘R")
+                .disabled(busy)
+            if app.section == .posts && app.focusMode {
+                Button("保存") { posts.save() }
+                    .buttonStyle(ToolbarPillButtonStyle(prominent: false, minWidth: 60))
+                    .disabled(!posts.isDirty || posts.busy)
+                    .help("保存到本地  ⌘S")
+            }
+            primaryAction
+        }
+        .fixedSize()
+        .padding(.trailing, WorkspaceToolbarMetrics.trailingInset)
     }
 
     @ViewBuilder private var primaryAction: some View {
@@ -384,7 +343,7 @@ struct RootView: View {
                     ShortcutCap(text: "⌘N", onPrimary: true)
                 }
             }
-            .buttonStyle(BlogPrimaryButtonStyle())
+            .buttonStyle(ToolbarPillButtonStyle())
             .disabled(posts.busy)
             .help("新建文章  ⌘N")
 
@@ -397,11 +356,11 @@ struct RootView: View {
                             ShortcutCap(text: "⌘⇧P", onPrimary: true)
                         }
                     }
-                    .buttonStyle(BlogPrimaryButtonStyle(compact: true))
+                    .buttonStyle(ToolbarPillButtonStyle())
                     .disabled(posts.busy)
                 } else {
                     Button("暂存发布") { posts.stage(true) }
-                        .buttonStyle(BlogPrimaryButtonStyle(compact: true))
+                        .buttonStyle(ToolbarPillButtonStyle())
                         .disabled(posts.busy || posts.draft.id.isEmpty)
                 }
             } else {
@@ -411,7 +370,7 @@ struct RootView: View {
                         ShortcutCap(text: "⌘N", onPrimary: true)
                     }
                 }
-                .buttonStyle(BlogPrimaryButtonStyle())
+                .buttonStyle(ToolbarPillButtonStyle())
                 .disabled(posts.busy)
                 .help("新建文章  ⌘N")
             }
@@ -423,7 +382,7 @@ struct RootView: View {
                     ShortcutCap(text: "⌘⇧N", onPrimary: true)
                 }
             }
-            .buttonStyle(BlogPrimaryButtonStyle())
+            .buttonStyle(ToolbarPillButtonStyle())
             .disabled(memos.busy)
             .help("写说说  ⌘⇧N")
 
@@ -434,15 +393,16 @@ struct RootView: View {
                     ShortcutCap(text: "⌘S", onPrimary: true)
                 }
             }
-            .buttonStyle(BlogPrimaryButtonStyle())
+            .buttonStyle(ToolbarPillButtonStyle())
             .disabled(!configuration.isDirty || configuration.busy)
             .help("审阅并提交配置变更  ⌘S")
 
         case .inbox:
             Button { inbox.setArchived(!inbox.archived) } label: {
-                Label(inbox.archived ? "返回进行中" : "归档", systemImage: inbox.archived ? "tray" : "archivebox")
+                Label(inbox.archived ? "返回进行中" : "归档记录", systemImage: inbox.archived ? "tray" : "archivebox")
             }
-            .buttonStyle(BlogSecondaryButtonStyle())
+            .labelStyle(.titleAndIcon)
+            .buttonStyle(ToolbarPillButtonStyle(prominent: false))
             .disabled(inbox.busy)
         }
     }
