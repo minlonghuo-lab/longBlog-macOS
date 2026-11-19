@@ -101,6 +101,8 @@ private final class ReaderSmokeRunner {
     private let themes = ["auto", "paper", "dark"]
     private var themeIndex = 0
     private var firstTimeOrigin: Double?
+    private var originalImageURL: String?
+    private var clickChecked = false
     private var navigationDispatched = false
     private var finishing = false
     private var assertions: [String: Bool] = [:]
@@ -199,6 +201,34 @@ private final class ReaderSmokeRunner {
                 host.rootView = reader
                 return
             }
+            if self.originalImageURL == nil, let host = content as? NSHostingView<ReaderView>,
+               let scratch = self.scratch, let first = checks["imageURL"] as? String {
+                self.originalImageURL = first
+                let next = scratch.appendingPathComponent("second", isDirectory: true)
+                do { try FileManager.default.copyItem(at: scratch.appendingPathComponent("article"), to: next) }
+                catch { self.finish(false, reason: "root_copy_failed"); return }
+                host.rootView = ReaderView(markdown: Self.fixture, baseDirectory: next, paperTheme: theme)
+                return
+            }
+            guard let imageURL = checks["imageURL"] as? String, imageURL != self.originalImageURL else { return }
+            self.assertions["articleSwitchKeepsDocument"] = origin == self.firstTimeOrigin
+            if !self.clickChecked {
+                self.clickChecked = true
+                _ = self.window?.makeFirstResponder(web)
+                self.polling = true
+                web.callAsyncJavaScript("""
+                    const body = document.getElementById('content').firstElementChild;
+                    body.click();
+                    await new Promise(requestAnimationFrame);
+                    return body === document.getElementById('content').firstElementChild;
+                    """, arguments: [:], in: nil, in: .page) { result in
+                        self.polling = false
+                        if case .success(let ok) = result {
+                            self.assertions["clickRetainsArticle"] = ok as? Bool == true && web.focusRingType == .none
+                        } else { self.assertions["clickRetainsArticle"] = false }
+                    }
+                return
+            }
             if !self.navigationDispatched {
                 guard let original = web.navigationDelegate else { self.finish(false, reason: "missing_production_delegate"); return }
                 let probe = NavigationProbe(original: original)
@@ -286,6 +316,7 @@ private final class ReaderSmokeRunner {
     return {
       theme: document.documentElement.dataset.theme,
       timeOrigin: performance.timeOrigin,
+      imageURL: local?.src,
       diagnostics: {
         localElement: local ? 1 : 0,
         localComplete: local && local.complete ? 1 : 0,

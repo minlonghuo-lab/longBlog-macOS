@@ -1,7 +1,9 @@
 #import "LBUIBridge.h"
 #import "LB.h"
 #import "LBMdStore.h"
-#import "LBMemos.h"
+#import "LBPlatform.h"
+#import "LBMemosCache.h"
+#import "LBMemosDiskCache.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSError *UIError(NSString *message) { return [NSError errorWithDomain:@"LongBlog.UI" code:1 userInfo:@{NSLocalizedDescriptionKey:message}]; }
@@ -39,6 +41,25 @@ static NSArray *Sessions(NSArray<LBSession *> *rows) {
     for (LBSession *s in rows) [result addObject:@{ @"id":s.sessionId, @"title":s.shortId, @"createdAt":@(s.createdAt), @"expiresAt":@(s.expiresAt), @"archived":@(s.archived), @"lastUserSequence":@(s.lastUserSequence), @"unread":@([LBSync.shared isUnread:s]), @"last":s.last ? Message(s.last) : @{} }];
     return result;
 }
+// Persist only the editable public values. The complete remote dotenv (including
+// comments and private keys) stays in memory and is re-read under its blob SHA on save.
+static NSDictionary *PublicEnv(NSDictionary *result) {
+    NSMutableDictionary *values = [NSMutableDictionary dictionary];
+    for (NSString *key in result[@"values"]) if ([key hasPrefix:@"PUBLIC_"]) values[key] = result[@"values"][key];
+    NSMutableArray *sections = [NSMutableArray array];
+    for (NSDictionary *section in result[@"sections"]) {
+        NSMutableDictionary *copy = [section mutableCopy];
+        NSMutableArray *keys = [NSMutableArray array];
+        for (NSDictionary *key in section[@"keys"]) {
+            NSMutableDictionary *field = [key mutableCopy]; [field removeObjectForKey:@"help"]; [keys addObject:field];
+        }
+        copy[@"keys"] = keys; [sections addObject:copy];
+    }
+    NSString *text = [LBEnvFile parse:result[@"text"]].publicSnapshotText;
+    if (!text) return nil;
+    return @{@"text":text, @"values":values, @"sections":sections, @"repo":result[@"repo"],
+             @"sha":result[@"sha"], @"localProjection":@YES};
+}
 static NSDictionary *EnvResult(NSString *text, NSString *sha, NSString *repo) {
     LBEnvFile *f = [LBEnvFile parse:text];
     NSMutableArray *sections = [NSMutableArray array];
@@ -60,13 +81,46 @@ static NSDictionary *EnvResult(NSString *text, NSString *sha, NSString *repo) {
     }
     return @{@"text":text, @"sha":sha ?: @"", @"repo":repo ?: @"", @"values":f.values, @"sections":sections};
 }
+static NSDictionary *DashboardSnapshot(void) {
+    LBSiteData *s = LBSiteData.shared; NSMutableDictionary *errors = [NSMutableDictionary dictionary];
+    [s.errors enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSError *e, BOOL *stop){ errors[k] = e.localizedDescription; }];
+    NSMutableDictionary *certs = [NSMutableDictionary dictionary];
+    [s.certs enumerateKeysAndObjectsUsingBlock:^(NSString *k, id value, BOOL *stop){ certs[k] = [value isKindOfClass:NSError.class] ? [value localizedDescription] : value; }];
+    long long latestPostAt = 0; NSString *latestPostTitle = @"";
+    for (NSDictionary *p in s.posts ?: @[]) {
+        long long ts = [p[@"updatedAt"] longLongValue] ?: ([p[@"publishedAt"] longLongValue] ?: [p[@"createdAt"] longLongValue]);
+        if (ts > latestPostAt) { latestPostAt = ts; latestPostTitle = p[@"title"] ?: @""; }
+    }
+    long long latestMemoAt = 0;
+    for (NSDictionary *m in s.memos ?: @[]) {
+        long long ts = ([m[@"displayTs"] longLongValue] ?: [m[@"createdTs"] longLongValue]) * 1000LL;
+        if (ts > latestMemoAt) latestMemoAt = ts;
+    }
+    BOOL deployPending = NO;
+    NSString *deployState = [s deployState:nil pending:&deployPending];
+    return @{@"postsCount":s.posts ? @(s.posts.count) : NSNull.null, @"publicMemosCount":s.memos ? @(s.memos.count) : NSNull.null,
+        @"friendsCount":s.envText ? @([LBEnvFile parse:s.envText].friendIndexes.count) : NSNull.null,
+        @"latestPostAt":@(latestPostAt), @"latestPostTitle":latestPostTitle, @"latestMemoAt":@(latestMemoAt),
+        @"head":s.head ?: @{}, @"build":s.build ?: @{}, @"memosVersion":s.memosVersion ?: @{}, @"certs":certs, @"errors":errors,
+        @"deployState":deployState, @"deployPending":@(deployPending),
+        @"siteURL":LBStore.siteURL ?: @"", @"repo":LBStore.repo ?: @"",
+        @"githubConfigured":@(LBGitHub.shared.configured), @"inboxConfigured":@(LBAPI.shared.configured),
+        @"memosConfigured":@(LBMemosClient.shared.configured)};
+}
 void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSError *)) {
     NSCAssert(NSThread.isMainThread, @"UI requests must start on main");
     LBMdStore *store = LBMdStore.shared;
-    if ([op isEqual:@"posts.list"] || [op isEqual:@"posts.load"] || [op isEqual:@"posts.new"] || [op isEqual:@"posts.save"] || [op isEqual:@"posts.stage"] || [op isEqual:@"posts.import"]) {
+    NSURL *articleIndex = [[LBApplicationSupportURL() URLByAppendingPathComponent:@"WorkspaceIndex"] URLByAppendingPathComponent:@"articles.plist"];
+    if ([op isEqual:@"posts.cached"]) {
+        dispatch_async(ArticleQueue(), ^{
+            NSArray *rows = [store cachedArticleListAtURL:articleIndex];
+            Finish(done,rows ? @{@"rows":rows, @"folder":store.folderDisplayName} : @{},nil);
+        }); return;
+    }
+    if ([op isEqual:@"posts.list"] || [op isEqual:@"posts.load"] || [op isEqual:@"posts.new"] || [op isEqual:@"posts.save"] || [op isEqual:@"posts.stage"] || [op isEqual:@"posts.delete"] || [op isEqual:@"posts.import"]) {
         dispatch_async(ArticleQueue(), ^{
             NSError *error = nil; NSDictionary *result = nil;
-            if ([op isEqual:@"posts.list"]) { NSArray *rows = store.listArticles; result = @{@"rows":rows, @"staged":[store stagedArticlesForArticles:rows], @"folder":store.folderDisplayName}; }
+            if ([op isEqual:@"posts.list"]) { NSArray *rows = [store listArticlesWithIndexAtURL:articleIndex]; result = @{@"rows":rows, @"staged":[store stagedArticlesForArticles:rows], @"folder":store.folderDisplayName}; }
             if ([op isEqual:@"posts.new"]) result = @{@"id":store.generateUniqueNoteID, @"title":@"", @"markdown":@"", @"summary":@"", @"publish":@NO, @"tags":@[]};
             if ([op isEqual:@"posts.load"]) {
                 NSMutableDictionary *row = [[store loadArticle:a[@"id"]] mutableCopy];
@@ -74,9 +128,10 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
                 else error = UIError(@"文章无法读取；原文件未修改。");
             }
             if ([op isEqual:@"posts.save"]) {
-                BOOL ok = [store saveArticleWithId:a[@"id"] title:a[@"title"] markdown:a[@"markdown"] summary:a[@"summary"] publish:[a[@"publish"] boolValue] tags:a[@"tags"] error:&error];
+                NSDictionary *savedPost = nil;
+                BOOL ok = [store saveArticleWithId:a[@"id"] title:a[@"title"] markdown:a[@"markdown"] summary:a[@"summary"] publish:[a[@"publish"] boolValue] tags:a[@"tags"] expectedRevision:a[@"sourceRevision"] ?: @"" savedPost:&savedPost error:&error];
                 if (ok) {
-                    NSMutableDictionary *row = [[store loadArticle:a[@"id"]] mutableCopy];
+                    NSMutableDictionary *row = [savedPost mutableCopy];
                     NSURL *directory = [store articleDirectoryURLForNote:a[@"id"]];
                     if (directory) row[@"directory"] = directory;
                     result = row;
@@ -86,6 +141,12 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
             if ([op isEqual:@"posts.stage"]) {
                 BOOL ok = [a[@"publish"] boolValue] ? [store stagePublishArticle:a[@"id"] error:&error] : [store stageUnpublishArticle:a[@"id"] error:&error];
                 if (ok) result = @{};
+            }
+            if ([op isEqual:@"posts.delete"]) {
+                [store deleteArticle:a[@"id"] done:^(NSError *deleteError){
+                    Finish(done,deleteError ? nil : @{},deleteError);
+                }];
+                return;
             }
             if ([op isEqual:@"posts.import"]) {
                 NSURL *source = a[@"url"]; BOOL access = [source startAccessingSecurityScopedResource];
@@ -103,36 +164,61 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
             Finish(done, result, error);
         }); return;
     }
+    if ([op isEqual:@"posts.check"]) {
+        NSString *repo = LBStore.repo; NSURL *folder = store.articlesFolderURL;
+        dispatch_async(KeychainQueue(), ^{
+            BOOL ready = [LBKeychain getWithoutPrompt:@"github-token"].length && [LBKeychain getWithoutPrompt:@"github-credential-id"].length;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!ready || ![repo isEqual:LBStore.repo] || ![folder isEqual:store.articlesFolderURL]) { Finish(done,@{},nil); return; }
+                NSString *last = store.lastPulledHead; if (!last) { Finish(done,@{},nil); return; }
+                [[[LBGitHub alloc] initWithRepository:repo] headCommit:^(NSDictionary *head, NSError *e){
+                    BOOL changed = !e && head && ![head[@"sha"] isEqual:last] && [folder isEqual:store.articlesFolderURL];
+                    Finish(done,@{@"changed":@(changed)},e);
+                }];
+            });
+        }); return;
+    }
     if ([op isEqual:@"posts.sync"]) { [store syncFromGitHub:^(NSError *e){ Finish(done, @{}, e); }]; return; }
     if ([op isEqual:@"posts.commit"]) { [store commitStagedArticles:a[@"rows"] message:a[@"message"] done:^(NSError *e){ Finish(done, @{}, e); }]; return; }
     if ([op isEqual:@"posts.revert"]) { [store revertStagedArticles:a[@"rows"] done:^(NSError *e){ Finish(done, @{}, e); }]; return; }
+    if ([op isEqual:@"site.live"]) { Finish(done,DashboardSnapshot(),nil); return; }
+    if ([op isEqual:@"site.cached"]) {
+        NSDictionary *saved = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"LBDashboardSnapshot"];
+        NSMutableDictionary *result = [NSMutableDictionary dictionary];
+        if ([saved[@"siteURL"] isEqual:LBStore.siteURL] && [saved[@"repo"] isEqual:LBStore.repo]) [result addEntriesFromDictionary:saved];
+        NSDictionary *env = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"LBPublicEnvSnapshot"];
+        if (!result[@"friendsCount"] && [env[@"repo"] isEqual:LBStore.repo] && [env[@"text"] isKindOfClass:NSString.class])
+            result[@"friendsCount"] = @([LBEnvFile parse:env[@"text"]].friendIndexes.count);
+        result[@"repo"] = LBStore.repo; result[@"siteURL"] = LBStore.siteURL;
+        Finish(done,result,nil); return;
+    }
+    if ([op isEqual:@"inbox.pollIfUnlocked"]) {
+        dispatch_async(KeychainQueue(), ^{
+            if ([LBKeychain getWithoutPrompt:@"owner-key"].length) dispatch_async(dispatch_get_main_queue(), ^{
+                if (LBAPI.shared.configured) [LBSync.shared startForegroundPolling];
+            });
+            Finish(done,@{},nil);
+        }); return;
+    }
+    static NSUInteger dashboardConnection;
     if ([op isEqual:@"site.refresh"]) {
+        NSUInteger connection = dashboardConnection;
+        NSString *site = LBStore.siteURL, *repo = LBStore.repo;
         WarmKeychain(@[@"github-token", @"github-credential-id", @"owner-key", @"memos-token"], ^{
-            [LBSiteData.shared refreshAll:^{
-                LBSiteData *s = LBSiteData.shared; NSMutableDictionary *errors = [NSMutableDictionary dictionary];
-                [s.errors enumerateKeysAndObjectsUsingBlock:^(NSString *k, NSError *e, BOOL *stop){ errors[k] = e.localizedDescription; }];
-                NSMutableDictionary *certs = [NSMutableDictionary dictionary];
-                [s.certs enumerateKeysAndObjectsUsingBlock:^(NSString *k, id value, BOOL *stop){ certs[k] = [value isKindOfClass:NSError.class] ? [value localizedDescription] : value; }];
-                long long latestPostAt = 0; NSString *latestPostTitle = @"";
-                for (NSDictionary *p in s.posts ?: @[]) {
-                    long long ts = [p[@"updatedAt"] longLongValue] ?: ([p[@"publishedAt"] longLongValue] ?: [p[@"createdAt"] longLongValue]);
-                    if (ts > latestPostAt) { latestPostAt = ts; latestPostTitle = p[@"title"] ?: @""; }
+            [LBSiteData.shared refreshDashboardForUserAction:[a[@"manual"] boolValue] done:^{
+                NSDictionary *result = DashboardSnapshot();
+                if (connection != dashboardConnection || ![repo isEqual:LBStore.repo] || ![site isEqual:LBStore.siteURL]) { Finish(done,nil,nil); return; }
+                NSDictionary *previous = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"LBDashboardSnapshot"];
+                NSMutableDictionary *summary = [previous[@"repo"] isEqual:repo] && [previous[@"siteURL"] isEqual:site] ?
+                    [previous mutableCopy] : [NSMutableDictionary dictionary];
+                for (NSString *key in @[@"siteURL",@"repo",@"publicMemosCount",@"friendsCount",@"latestMemoAt",@"deployState",@"githubConfigured",@"inboxConfigured",@"memosConfigured",@"head",@"build",@"certs",@"deployPending",@"memosVersion"]) {
+                    id value = result[key];
+                    if ([value isKindOfClass:NSDictionary.class] && ![value count]) continue;
+                    if (value && [NSPropertyListSerialization propertyList:value isValidForFormat:NSPropertyListBinaryFormat_v1_0]) summary[key] = value;
                 }
-                long long latestMemoAt = 0;
-                for (NSDictionary *m in s.memos ?: @[]) {
-                    long long ts = ([m[@"displayTs"] longLongValue] ?: [m[@"createdTs"] longLongValue]) * 1000LL;
-                    if (ts > latestMemoAt) latestMemoAt = ts;
-                }
-                BOOL deployPending = NO;
-                NSString *deployState = [s deployState:nil pending:&deployPending];
-                Finish(done, @{@"postsCount":s.posts ? @(s.posts.count) : NSNull.null, @"publicMemosCount":s.memos ? @(s.memos.count) : NSNull.null,
-                    @"friendsCount":s.envText ? @([LBEnvFile parse:s.envText].friendIndexes.count) : NSNull.null,
-                    @"latestPostAt":@(latestPostAt), @"latestPostTitle":latestPostTitle, @"latestMemoAt":@(latestMemoAt),
-                    @"head":s.head ?: @{}, @"build":s.build ?: @{}, @"memosVersion":s.memosVersion ?: @{}, @"certs":certs, @"errors":errors,
-                    @"deployState":deployState, @"deployPending":@(deployPending),
-                    @"siteURL":LBStore.siteURL ?: @"", @"repo":LBStore.repo ?: @"",
-                    @"githubConfigured":@(LBGitHub.shared.configured), @"inboxConfigured":@(LBAPI.shared.configured),
-                    @"memosConfigured":@(LBMemosClient.shared.configured)}, nil);
+                summary[@"checkedAt"] = NSDate.date;
+                [NSUserDefaults.standardUserDefaults setObject:summary forKey:@"LBDashboardSnapshot"];
+                Finish(done,result,nil);
             }];
         }); return;
     }
@@ -175,21 +261,67 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
     if ([op isEqual:@"inbox.contact"]) { [LBAPI.shared fetchSessionContact:a[@"id"] done:^(NSDictionary *contact, NSError *e){ Finish(done,contact ?: @{},e); }]; return; }
     if ([op isEqual:@"inbox.reply"]) { [LBAPI.shared reply:a[@"id"] messageId:a[@"messageID"] text:a[@"text"] done:^(LBMessage *m, NSError *e){ Finish(done,m ? Message(m) : nil,e); }]; return; }
     LBMemosClient *memos = LBMemosClient.shared;
+    if ([op isEqual:@"memos.cached"]) {
+        if ([NSProcessInfo.processInfo.arguments containsObject:@"--smoke-test"]) { Finish(done,@{},nil); return; }
+        [memos offlineState:a[@"state"] done:^(NSArray *list){ Finish(done,list ? @{@"rows":list} : @{},nil); }]; return;
+    }
+    if ([op isEqual:@"memos.check"]) {
+        BOOL manual = [a[@"manual"] boolValue];
+        dispatch_async(KeychainQueue(), ^{
+            NSString *token = manual ? [LBKeychain get:@"memos-token"] : [LBKeychain getWithoutPrompt:@"memos-token"];
+            if (!token.length) { Finish(done,nil,UIError(@"点击“验证 / 刷新”以授权同步说说。")); return; }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                void (^sync)(NSDictionary *, NSError *) = ^(NSDictionary *user, NSError *error) {
+                    if (error) { Finish(done,nil,error); return; }
+                    NSString *state = a[@"state"];
+                    [memos allState:state text:@"" tag:@"" done:^(NSArray *list, NSError *e){
+                        Finish(done, list ? @{@"rows":list, @"username":user[@"nickname"] ?: user[@"username"] ?: @""} : nil, e);
+                    }];
+                };
+                if (memos.user && !manual) sync(memos.user, nil); else [memos validate:sync];
+            });
+        }); return;
+    }
     if ([op isEqual:@"memos.validate"]) { WarmKeychain(@[@"memos-token"], ^{ [memos validate:^(NSDictionary *user, NSError *e){ Finish(done,user,e); }]; }); return; }
     if ([op isEqual:@"memos.list"]) { [memos listState:a[@"state"] text:a[@"text"] ?: @"" tag:@"" offset:[a[@"offset"] unsignedIntegerValue] done:^(NSArray *rows, BOOL more, NSError *e){ Finish(done,@{@"rows":rows ?: @[], @"more":@(more)},e); }]; return; }
     if ([op isEqual:@"memos.save"]) { [memos saveOriginal:a[@"original"] content:a[@"content"] visibility:a[@"visibility"] resourceIDs:a[@"resourceIDs"] done:^(NSDictionary *row, NSError *e){ Finish(done,row,e); }]; return; }
     if ([op isEqual:@"memos.update"]) { [memos updateMemo:a[@"original"] fields:a[@"fields"] done:^(NSDictionary *row, NSError *e){ Finish(done,row,e); }]; return; }
+    if ([op isEqual:@"memos.delete"]) { [memos deleteArchived:a[@"original"] done:^(NSError *e){ Finish(done,@{},e); }]; return; }
+    if ([op isEqual:@"memos.prefetch"]) { [memos prefetchAllResources]; Finish(done,memos.cacheProgress ?: @{},nil); return; }
+    if ([op isEqual:@"memos.cacheProgress"]) { Finish(done,memos.cacheProgress ?: @{},nil); return; }
+    if ([op isEqual:@"memos.cachedResource"]) {
+        NSURL *url = [memos cachedResource:a[@"resource"]];
+        Finish(done, url ? @{@"url":url} : @{}, nil);
+        return;
+    }
     if ([op isEqual:@"memos.upload"]) {
         NSURL *url = a[@"url"]; BOOL access = [url startAccessingSecurityScopedResource];
         UTType *type = [UTType typeWithFilenameExtension:url.pathExtension];
         [memos uploadFile:url filename:url.lastPathComponent type:type.preferredMIMEType ?: @"application/octet-stream" progress:nil done:^(NSDictionary *resource, NSError *e){ if (access) [url stopAccessingSecurityScopedResource]; Finish(done,resource,e); }]; return;
     }
     if ([op isEqual:@"memos.download"]) { [memos downloadResource:a[@"resource"] done:^(NSURL *url, NSError *e){ Finish(done,url ? @{@"url":url} : nil,e); }]; return; }
+    static NSUInteger envRequest;
+    if ([op isEqual:@"env.cached"]) {
+        NSDictionary *cached = [NSProcessInfo.processInfo.arguments containsObject:@"--smoke-test"] ? nil : [NSUserDefaults.standardUserDefaults dictionaryForKey:@"LBPublicEnvSnapshot"];
+        Finish(done, [cached[@"repo"] isEqual:LBStore.repo] ? cached : @{}, nil); return;
+    }
     if ([op isEqual:@"env.load"]) {
-        WarmKeychain(@[@"github-token", @"github-credential-id"], ^{
-            if (!LBGitHub.shared.configured) { Finish(done,nil,UIError(@"请先配置 GitHub 仓库与令牌。")); return; }
-            LBGitHub *client = [[LBGitHub alloc] initWithRepository:LBStore.repo];
-            [client getFile:@".env" ref:@"main" done:^(NSString *text, NSString *sha, NSError *e){ Finish(done,text ? EnvResult(text,sha,client.repository) : nil,e); }];
+        NSString *repo = LBStore.repo;
+        BOOL silent = [a[@"silent"] boolValue]; NSUInteger revision = ++envRequest;
+        dispatch_async(KeychainQueue(), ^{
+            BOOL ready = silent ? [LBKeychain getWithoutPrompt:@"github-token"].length && [LBKeychain getWithoutPrompt:@"github-credential-id"].length : [LBKeychain get:@"github-token"].length > 0;
+            if (!silent && ready) (void)[LBKeychain get:@"github-credential-id"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!ready || ![repo isEqual:LBStore.repo]) { Finish(done,nil,UIError(@"请在连接设置中保存可用的 GitHub 令牌，再刷新站点配置。")); return; }
+                LBGitHub *client = [[LBGitHub alloc] initWithRepository:repo];
+                [client checkEnvSinceBlob:a[@"sha"] done:^(NSString *text, NSString *sha, NSError *e){
+                    if (revision != envRequest) { Finish(done,@{@"unchanged":@YES},nil); return; }
+                    if (e || !text) { Finish(done, e ? nil : @{@"unchanged":@YES}, e); return; }
+                    NSDictionary *result = EnvResult(text, sha, repo);
+                    [NSUserDefaults.standardUserDefaults setObject:PublicEnv(result) forKey:@"LBPublicEnvSnapshot"];
+                    Finish(done, result, nil);
+                }];
+            });
         }); return;
     }
     if ([op isEqual:@"settings.load"]) {
@@ -214,6 +346,17 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
         }); return;
     }
     if ([op isEqual:@"env.preview"] || [op isEqual:@"env.save"]) {
+        if ([op isEqual:@"env.save"] && [a[@"localProjection"] boolValue]) {
+            if (![a[@"repo"] isEqual:LBStore.repo]) { Finish(done,nil,UIError(@"仓库已切换，请重新载入。")); return; }
+            WarmKeychain(@[@"github-token", @"github-credential-id"], ^{
+                LBGitHub *client = [[LBGitHub alloc] initWithRepository:a[@"repo"]];
+                [client getFile:@".env" done:^(NSString *text, NSString *sha, NSError *e){
+                    if (e || ![sha isEqual:a[@"sha"]]) { Finish(done,nil,e ?: UIError(@"云端配置已变化，请重新载入并核对修改。")); return; }
+                    NSMutableDictionary *args = [a mutableCopy]; args[@"text"] = text; [args removeObjectForKey:@"localProjection"];
+                    LBUIRequest(op,args,done);
+                }];
+            }); return;
+        }
         LBEnvFile *file = [LBEnvFile parse:a[@"text"]]; NSString *failure = nil;
         NSDictionary *values = a[@"values"];
         for (NSString *key in values) { if ([[file valueFor:key] isEqual:values[key]]) continue; failure = [file updateValue:values[key] forKey:key]; if (failure) break; }
@@ -224,7 +367,12 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
         if (![a[@"repo"] isEqual:LBStore.repo] || ![a[@"sha"] length]) { Finish(done,nil,UIError(@"仓库已变化或缺少基准 SHA，请重新载入配置。")); return; }
         LBGitHub *client = [[LBGitHub alloc] initWithRepository:a[@"repo"]];
         [client putFile:@".env" text:edited sha:a[@"sha"] message:a[@"message"] ?: @"Update site configuration from longBlog macOS" done:^(NSString *sha, NSError *e){
-            if (sha && !e) [LBSiteData.shared didCommitEnv:edited commit:sha]; Finish(done,sha ? @{@"commit":sha, @"text":edited} : nil,e);
+            if (sha && !e) {
+                envRequest++;
+                [NSUserDefaults.standardUserDefaults removeObjectForKey:@"LBPublicEnvSnapshot"];
+                [LBSiteData.shared didCommitEnv:edited commit:sha];
+            }
+            Finish(done,sha ? @{@"commit":sha, @"text":edited} : nil,e);
         }]; return;
     }
     if ([op isEqual:@"settings.folder"] || [op isEqual:@"settings.resetFolder"]) {
@@ -264,12 +412,15 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
         NSString *githubToken = [a[@"githubToken"] ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
         NSString *inboxURL = a[@"inboxURL"] ?: @"";
         NSString *hosts = a[@"hosts"] ?: @"";
+        BOOL newInbox = ![inboxURL isEqual:LBAPI.shared.baseURL];
+        BOOL newMemos = ![memosRaw isEqual:memos.baseURL];
         dispatch_async(KeychainQueue(), ^{
             NSString *prevOwnerKey = [LBKeychain get:@"owner-key"] ?: @"";
             NSString *prevGithubToken = [LBKeychain get:@"github-token"] ?: @"";
             BOOL ownerChanged = ![prevOwnerKey isEqualToString:inboxToken];
             BOOL githubChanged = ![prevGithubToken isEqualToString:githubToken];
 
+            if (![[LBKeychain get:@"memos-token"] ?: @"" isEqual:memosToken]) [LBMemosDiskCache clearOfflineBinding];
             [LBKeychain set:memosToken account:@"memos-token"];
             if (![([LBKeychain get:@"memos-token"] ?: @"") isEqualToString:memosToken]) {
                 Finish(done, nil, UIError(@"Memos 钥匙串保存失败；请检查签名和钥匙串权限。"));
@@ -285,7 +436,12 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
             BOOL githubSaved = [([LBKeychain get:@"github-token"] ?: @"") isEqualToString:githubToken];
 
             dispatch_async(dispatch_get_main_queue(), ^{
+                dashboardConnection++;
                 if (ownerChanged) [LBAPI.shared noteCredentialChange];
+                [NSUserDefaults.standardUserDefaults removeObjectForKey:@"LBDashboardSnapshot"];
+                if (githubChanged || ![repo isEqual:LBStore.repo]) {
+                    [NSUserDefaults.standardUserDefaults removeObjectForKey:@"LBPublicEnvSnapshot"];
+                }
                 if (githubChanged) [LBGitHub noteCredentialChange];
                 if (![memos configureBaseURL:memosRaw token:memosToken]) {
                     Finish(done, nil, UIError(@"Memos 钥匙串保存失败；请检查签名和钥匙串权限。"));
@@ -295,6 +451,8 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
                     Finish(done, nil, UIError(@"钥匙串保存失败，部分其他连接可能已保存。请检查钥匙串权限。"));
                     return;
                 }
+                if (newInbox && !inboxToken.length) [LBKeychain detach:@"owner-key"];
+                if (newMemos && !memosToken.length) [LBKeychain detach:@"memos-token"];
                 LBAPI.shared.baseURL = inboxURL; LBStore.siteURL = site; LBStore.repo = repo; [LBStore setCertHosts:hosts];
                 [LBSync.shared resetBaseline]; [LBSiteData.shared resetConnection]; Finish(done, @{}, nil);
             });

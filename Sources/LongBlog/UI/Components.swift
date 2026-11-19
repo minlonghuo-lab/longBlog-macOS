@@ -57,6 +57,7 @@ extension Color {
     static let blogGreen = Color(nsColor: .lb(light: .rgb(38, 132, 82), dark: .rgb(127, 214, 154)))
     static let blogTeal = Color(nsColor: .lb(light: .rgb(44, 126, 132), dark: .rgb(130, 204, 204)))
     static let blogAmber = Color(nsColor: .lb(light: .rgb(184, 114, 28), dark: .rgb(240, 186, 108)))
+    static let blogDanger = Color(nsColor: .lb(light: .rgb(198, 56, 56), dark: .rgb(245, 118, 118)))
 
     // Design-spec semantic metric tints (Scheme 1 Tahoe warm glass)
     static let blogTintPeach = Color(nsColor: .lb(light: .rgb(184, 98, 60, 0.10), dark: .rgb(232, 180, 154, 0.15)))
@@ -116,15 +117,98 @@ struct HairlineDivider: View {
     }
 }
 
-// MARK: - Buttons & Segmented Controls
+// MARK: - Liquid Glass Helpers (macOS 26+ official Apple Liquid Glass, macOS 14–15 warm fallback)
 
-/// Bespoke peach primary button matching the chosen Tahoe warm glass design (`#e8b49a` + `#33241c`).
-struct BlogPrimaryButtonStyle: ButtonStyle {
+/// Groups adjacent toolbar or action-bar controls in Apple's official `GlassEffectContainer` on macOS 26+.
+struct BlogGlassGroup<Content: View>: View {
+    var spacing: CGFloat = 8
+    let content: Content
+    init(spacing: CGFloat = 8, @ViewBuilder content: () -> Content) {
+        self.spacing = spacing
+        self.content = content()
+    }
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                HStack(spacing: spacing) {
+                    content
+                }
+            }
+        } else {
+            HStack(spacing: spacing) {
+                content
+            }
+        }
+    }
+}
+
+extension View {
+    /// Applies official Apple interactive Liquid Glass on macOS 26+ (no fake opaque overlay or double stroke),
+    /// with a warm translucent fallback on macOS 14–15.
+    @ViewBuilder
+    func blogGlassControl(
+        cornerRadius: CGFloat = 10,
+        capsule: Bool = false,
+        interactive: Bool = true,
+        tint: Color? = nil,
+        fallbackFill: Color = .blogSurface,
+        fallbackStroke: Color = .blogStroke
+    ) -> some View {
+        if #available(macOS 26.0, *) {
+            let baseGlass: Glass = {
+                var g = Glass.regular
+                if let tint { g = g.tint(tint) }
+                if interactive { g = g.interactive() }
+                return g
+            }()
+            if capsule {
+                self.glassEffect(baseGlass, in: Capsule())
+            } else {
+                self.glassEffect(baseGlass, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            }
+        } else {
+            if capsule {
+                self
+                    .background(fallbackFill, in: Capsule())
+                    .overlay(Capsule().strokeBorder(fallbackStroke))
+            } else {
+                self
+                    .background(fallbackFill, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous).strokeBorder(fallbackStroke))
+            }
+        }
+    }
+}
+
+// MARK: - Official Liquid Glass Buttons (macOS 26+ .glassProminent / .glass)
+
+/// Primary CTA button: uses Apple's official `.buttonStyle(.glassProminent)` with warm peach tint on macOS 26+.
+struct BlogPrimaryButtonStyle: PrimitiveButtonStyle {
     var compact = false
     func makeBody(configuration: Configuration) -> some View {
-        PrimaryBody(configuration: configuration, compact: compact)
+        if #available(macOS 26.0, *) {
+            Button(role: configuration.role, action: configuration.trigger) {
+                configuration.label
+                    .foregroundStyle(Color.blogPeachInk)
+            }
+            .buttonStyle(.glassProminent)
+            .buttonBorderShape(.capsule)
+            .controlSize(compact ? .small : .regular)
+            .tint(.blogPeach)
+            .font(.system(size: compact ? 12 : 13, weight: .semibold))
+        } else {
+            Button(configuration)
+                .buttonStyle(LegacyPrimaryButtonStyle(compact: compact))
+        }
     }
-    private struct PrimaryBody: View {
+}
+
+private struct LegacyPrimaryButtonStyle: ButtonStyle {
+    var compact = false
+    func makeBody(configuration: Configuration) -> some View {
+        LegacyBody(configuration: configuration, compact: compact)
+    }
+    private struct LegacyBody: View {
         let configuration: ButtonStyle.Configuration
         let compact: Bool
         @Environment(\.isEnabled) private var isEnabled
@@ -133,31 +217,51 @@ struct BlogPrimaryButtonStyle: ButtonStyle {
             configuration.label
                 .font(.system(size: compact ? 12 : 13, weight: .semibold))
                 .foregroundStyle(Color.blogPeachInk)
-                .padding(.horizontal, compact ? 11 : 14)
-                .padding(.vertical, compact ? 5 : 7)
+                .padding(.horizontal, compact ? 12 : 15)
+                .padding(.vertical, compact ? 5.5 : 7)
                 .background {
-                    RoundedRectangle(cornerRadius: compact ? 7 : 9, style: .continuous)
+                    Capsule()
                         .fill(Color.blogPeach)
                         .brightness(hovering && isEnabled ? 0.05 : 0)
                         .shadow(color: Color.blogPeach.opacity(hovering && isEnabled ? 0.24 : 0.10), radius: hovering ? 8 : 3, y: 2)
                 }
                 .opacity(isEnabled ? 1 : 0.42)
-                .scaleEffect(configuration.isPressed && isEnabled ? 0.98 : 1)
+                .scaleEffect(configuration.isPressed && isEnabled ? 0.975 : 1)
                 .onHover { hovering = $0 }
                 .animation(.easeOut(duration: 0.12), value: hovering)
-                .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
         }
     }
 }
 
-/// Bespoke secondary outline button matching the design spec (`1px` warm stroke + glass hover).
-struct BlogSecondaryButtonStyle: ButtonStyle {
+/// Secondary / destructive button: uses Apple's official neutral `.buttonStyle(.glass)` on macOS 26+.
+struct BlogSecondaryButtonStyle: PrimitiveButtonStyle {
     var compact = false
     var destructive = false
     func makeBody(configuration: Configuration) -> some View {
-        SecondaryBody(configuration: configuration, compact: compact, destructive: destructive)
+        if #available(macOS 26.0, *) {
+            Button(role: configuration.role, action: configuration.trigger) {
+                configuration.label
+                    .foregroundStyle(destructive ? Color.blogDanger : Color.blogText)
+            }
+            .buttonStyle(.glass)
+            .buttonBorderShape(.capsule)
+            .controlSize(compact ? .small : .regular)
+            .tint(nil)
+            .font(.system(size: compact ? 12 : 13, weight: .medium))
+        } else {
+            Button(configuration)
+                .buttonStyle(LegacySecondaryButtonStyle(compact: compact, destructive: destructive))
+        }
     }
-    private struct SecondaryBody: View {
+}
+
+private struct LegacySecondaryButtonStyle: ButtonStyle {
+    var compact = false
+    var destructive = false
+    func makeBody(configuration: Configuration) -> some View {
+        LegacyBody(configuration: configuration, compact: compact, destructive: destructive)
+    }
+    private struct LegacyBody: View {
         let configuration: ButtonStyle.Configuration
         let compact: Bool
         let destructive: Bool
@@ -167,16 +271,16 @@ struct BlogSecondaryButtonStyle: ButtonStyle {
             let fg: Color = destructive ? .red : .blogText
             configuration.label
                 .font(.system(size: compact ? 12 : 13, weight: .medium))
-                .foregroundStyle(fg.opacity(hovering ? 1 : 0.9))
-                .padding(.horizontal, compact ? 10 : 13)
-                .padding(.vertical, compact ? 5 : 7)
+                .foregroundStyle(fg.opacity(hovering ? 1 : 0.92))
+                .padding(.horizontal, compact ? 11 : 14)
+                .padding(.vertical, compact ? 5.5 : 7)
                 .background(
                     hovering && isEnabled ? (destructive ? Color.red.opacity(0.12) : Color.blogSurfaceHover) : Color.blogSurface,
-                    in: RoundedRectangle(cornerRadius: compact ? 7 : 9, style: .continuous)
+                    in: Capsule()
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: compact ? 7 : 9, style: .continuous)
-                        .strokeBorder(destructive ? Color.red.opacity(0.35) : (hovering && isEnabled ? Color.blogStrokeStrong : Color.blogStroke))
+                    Capsule()
+                        .strokeBorder(destructive ? Color.red.opacity(0.38) : (hovering && isEnabled ? Color.blogStrokeStrong : Color.blogStroke))
                 )
                 .opacity(isEnabled ? 1 : 0.42)
                 .scaleEffect(configuration.isPressed && isEnabled ? 0.985 : 1)
@@ -192,7 +296,7 @@ struct ShortcutCap: View {
     var body: some View {
         Text(text)
             .font(.system(size: 11, weight: .medium, design: .rounded))
-            .foregroundStyle(onPrimary ? Color.blogPeachInk.opacity(0.72) : Color.blogMuted)
+            .foregroundStyle(onPrimary ? Color.blogPeachInk.opacity(0.75) : Color.blogMuted)
     }
 }
 
@@ -204,53 +308,259 @@ struct SegmentedOption<Value: Hashable>: Identifiable {
     var id: Value { value }
 }
 
-/// Design-spec dark inset slot segmented control with smooth pill selection.
+private struct SegmentFrameKey: PreferenceKey {
+    static var defaultValue: [Int: CGRect] = [:]
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
+    }
+}
+
+/// Official-style interactive Liquid Glass segmented control:
+/// Tap any segment, or press-and-hold the Liquid Glass lens to glide 1:1 across segments at 120fps.
+/// Strictly keeps the current page unchanged while the mouse button is held down (`onChanged`),
+/// and commits `selection` only when the mouse button is released (`onEnded`).
 struct BlogSegmentedControl<Value: Hashable>: View {
     let options: [SegmentedOption<Value>]
     @Binding var selection: Value
     var compact = false
-    @Namespace private var namespace
+    var onLightSurface = false
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var segmentFrames: [Int: CGRect] = [:]
+    @State private var isDragging = false
+    @State private var dragCenterX: CGFloat? = nil
+    @State private var dragGrabOffset: CGFloat = 0
+    @State private var didCaptureGrab = false
+    @State private var hoveredIndex: Int? = nil
+    @State private var pendingIndex: Int? = nil
+
+    private var selectedIndex: Int {
+        options.firstIndex(where: { $0.value == selection }) ?? 0
+    }
+
+    private var activeVisualIndex: Int {
+        if isDragging {
+            return hoveredIndex ?? selectedIndex
+        }
+        return pendingIndex ?? selectedIndex
+    }
+
+    /// Interpolates both center X and width smoothly across segments so dragging never jumps or stalls.
+    private var currentLensFrame: CGRect {
+        let targetIdx = activeVisualIndex
+        let fallback = segmentFrames[targetIdx] ?? segmentFrames[selectedIndex] ?? .zero
+        guard isDragging, let rawX = dragCenterX, options.count > 0, fallback.width > 0 else {
+            return fallback
+        }
+        let sorted = (0..<options.count).compactMap { idx -> (Int, CGRect)? in
+            guard let f = segmentFrames[idx], f.width > 0 else { return nil }
+            return (idx, f)
+        }
+        guard let first = sorted.first?.1, let last = sorted.last?.1 else { return fallback }
+
+        let minCenter = first.midX
+        let maxCenter = last.midX
+        let clampedCenter: CGFloat
+        if rawX < minCenter {
+            let over = minCenter - rawX
+            clampedCenter = minCenter - (1 - exp(-over / 24)) * 3.5
+        } else if rawX > maxCenter {
+            let over = rawX - maxCenter
+            clampedCenter = maxCenter + (1 - exp(-over / 24)) * 3.5
+        } else {
+            clampedCenter = rawX
+        }
+
+        var interpWidth = fallback.width
+        if sorted.count >= 2 {
+            if clampedCenter <= first.midX {
+                interpWidth = first.width
+            } else if clampedCenter >= last.midX {
+                interpWidth = last.width
+            } else {
+                for i in 0..<(sorted.count - 1) {
+                    let a = sorted[i].1
+                    let b = sorted[i + 1].1
+                    if clampedCenter >= a.midX && clampedCenter <= b.midX {
+                        let span = max(1, b.midX - a.midX)
+                        let t = (clampedCenter - a.midX) / span
+                        interpWidth = a.width + (b.width - a.width) * t
+                        break
+                    }
+                }
+            }
+        }
+        return CGRect(x: clampedCenter - interpWidth / 2, y: first.minY, width: interpWidth, height: first.height)
+    }
 
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(options) { opt in
-                let active = selection == opt.value
-                Button {
-                    withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
-                        selection = opt.value
+        let trackContent = ZStack(alignment: .topLeading) {
+            let frame = currentLensFrame
+            if frame.width > 1 && frame.height > 1 {
+                lensView
+                    .frame(width: frame.width, height: frame.height)
+                    .scaleEffect(x: isDragging ? 1.025 : 1.0, y: isDragging ? 1.05 : 1.0, anchor: .center)
+                    .offset(x: frame.minX, y: frame.minY)
+                    .animation(.spring(response: 0.24, dampingFraction: 0.84), value: activeVisualIndex)
+                    .animation(.spring(response: 0.22, dampingFraction: 0.82), value: isDragging)
+                    .transaction { tx in
+                        if isDragging {
+                            // Locked 1:1 cursor tracking during drag (zero spring chase lag).
+                            tx.animation = nil
+                        }
                     }
-                } label: {
+                    .allowsHitTesting(false)
+            }
+
+            HStack(spacing: 2) {
+                ForEach(Array(options.enumerated()), id: \.element.id) { idx, opt in
+                    let active = idx == activeVisualIndex
                     HStack(spacing: 5) {
                         if let symbol = opt.symbol {
-                            Image(systemName: symbol).font(.system(size: compact ? 11 : 12, weight: active ? .semibold : .regular))
+                            Image(systemName: symbol)
+                                .font(.system(size: compact ? 11 : 12, weight: active ? .semibold : .regular))
                         }
                         Text(opt.label)
                             .font(.system(size: compact ? 11.5 : 12.5, weight: active ? .semibold : .medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         if let count = opt.count {
                             Text("\(count)")
                                 .font(.system(size: 10.5, weight: .semibold).monospacedDigit())
                                 .foregroundStyle(active ? Color.blogPeach : Color.blogMuted)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                     }
-                    .foregroundStyle(active ? Color.blogText : Color.blogMuted)
-                    .padding(.horizontal, compact ? 9 : 11)
-                    .padding(.vertical, compact ? 4 : 5)
-                    .contentShape(Rectangle())
-                    .background {
-                        if active {
-                            RoundedRectangle(cornerRadius: compact ? 6 : 7, style: .continuous)
-                                .fill(Color.blogSlotActive)
-                                .overlay(RoundedRectangle(cornerRadius: compact ? 6 : 7, style: .continuous).strokeBorder(Color.blogStroke))
-                                .matchedGeometryEffect(id: "seg-pill", in: namespace)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .foregroundStyle(labelColor(active: active))
+                    .padding(.horizontal, compact ? 10 : 12)
+                    .padding(.vertical, compact ? 4.5 : 5.5)
+                    .contentShape(Capsule())
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: SegmentFrameKey.self,
+                                value: [idx: geo.frame(in: .named("lb-seg-track"))]
+                            )
+                        }
+                    )
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(opt.label)
+                    .accessibilityAddTraits(opt.value == selection ? [.isButton, .isSelected] : .isButton)
+                }
+            }
+        }
+        .coordinateSpace(name: "lb-seg-track")
+        .padding(3)
+        .onPreferenceChange(SegmentFrameKey.self) { next in
+            if framesChangedSignificantly(segmentFrames, next) {
+                segmentFrames = next
+            }
+        }
+        .onChange(of: selection) { _, _ in
+            pendingIndex = nil
+        }
+        .contentShape(Capsule())
+        .gesture(
+            DragGesture(minimumDistance: 0, coordinateSpace: .named("lb-seg-track"))
+                .onChanged { value in
+                    guard isEnabled, !segmentFrames.isEmpty else { return }
+                    if !didCaptureGrab {
+                        didCaptureGrab = true
+                        pendingIndex = nil
+                        if let selFrame = segmentFrames[selectedIndex],
+                           selFrame.insetBy(dx: -4, dy: -8).contains(value.startLocation) {
+                            // Pressing on the active thumb preserves the exact grab offset (zero initial jump).
+                            dragGrabOffset = value.startLocation.x - selFrame.midX
+                        } else {
+                            dragGrabOffset = 0
+                        }
+                    }
+                    let moved = abs(value.translation.width) > 1.0
+                    let pressedOther = nearestIndex(for: value.startLocation.x) != selectedIndex
+                    if moved || pressedOther || isDragging {
+                        if !isDragging {
+                            isDragging = true
+                            hoveredIndex = selectedIndex
+                        }
+                        let effectiveX = value.location.x - dragGrabOffset
+                        dragCenterX = effectiveX
+                        if let nearest = nearestIndex(for: effectiveX), nearest != hoveredIndex {
+                            hoveredIndex = nearest
+                            NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
                         }
                     }
                 }
-                .buttonStyle(.plain)
+                .onEnded { value in
+                    defer {
+                        didCaptureGrab = false
+                        dragGrabOffset = 0
+                    }
+                    guard isEnabled, !segmentFrames.isEmpty else { return }
+                    let effectiveX = isDragging ? (value.location.x - dragGrabOffset) : value.location.x
+                    let targetIdx = nearestIndex(for: effectiveX) ?? hoveredIndex ?? selectedIndex
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.84)) {
+                        pendingIndex = targetIdx
+                        isDragging = false
+                        dragCenterX = nil
+                        hoveredIndex = nil
+                    }
+                    // Commit selection strictly on mouse release (never while holding/dragging).
+                    if options.indices.contains(targetIdx), selection != options[targetIdx].value {
+                        selection = options[targetIdx].value
+                    } else {
+                        pendingIndex = nil
+                    }
+                }
+        )
+        .opacity(isEnabled ? 1 : 0.48)
+
+        // Single clean recessed capsule track (never nested .glassEffect inside .glassEffect).
+        trackContent
+            .background(
+                Capsule().fill(onLightSurface ? Color.black.opacity(0.065) : Color.blogSlot)
+            )
+            .overlay(
+                Capsule().strokeBorder(onLightSurface ? Color.black.opacity(0.08) : Color.blogStroke)
+            )
+            .fixedSize()
+    }
+
+    @ViewBuilder
+    private var lensView: some View {
+        if #available(macOS 26.0, *) {
+            // Pure GPU-accelerated Liquid Glass lens with no software drop-shadow re-rasterization per frame.
+            Capsule()
+                .fill(onLightSurface ? Color.white.opacity(0.45) : Color.blogSlotActive.opacity(0.36))
+                .glassEffect(.regular.interactive(), in: Capsule())
+        } else {
+            Capsule()
+                .fill(onLightSurface ? Color.white.opacity(0.88) : Color.blogSlotActive)
+                .overlay(Capsule().strokeBorder(Color.blogStroke.opacity(0.75)))
+        }
+    }
+
+    private func labelColor(active: Bool) -> Color {
+        if onLightSurface {
+            return active ? Color(nsColor: .rgb(47, 38, 31)) : Color(nsColor: .rgb(122, 107, 96))
+        }
+        return active ? Color.blogText : Color.blogMuted
+    }
+
+    private func nearestIndex(for x: CGFloat) -> Int? {
+        segmentFrames.min(by: { abs($0.value.midX - x) < abs($1.value.midX - x) })?.key
+    }
+
+    private func framesChangedSignificantly(_ lhs: [Int: CGRect], _ rhs: [Int: CGRect]) -> Bool {
+        guard lhs.count == rhs.count else { return true }
+        for (k, a) in lhs {
+            guard let b = rhs[k] else { return true }
+            if abs(a.minX - b.minX) > 0.5 || abs(a.width - b.width) > 0.5 || abs(a.height - b.height) > 0.5 {
+                return true
             }
         }
-        .padding(3)
-        .background(Color.blogSlot, in: RoundedRectangle(cornerRadius: compact ? 8 : 9, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: compact ? 8 : 9, style: .continuous).strokeBorder(Color.blogStroke))
+        return false
     }
 }
 
@@ -373,12 +683,14 @@ struct SearchField: View {
                     .foregroundStyle(Color.blogMuted.opacity(0.75))
             }
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6.5)
-        .background(Color.blogField, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(isFocused ? Color.blogPeach.opacity(0.6) : Color.blogStroke)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .blogGlassControl(
+            capsule: true,
+            interactive: true,
+            tint: isFocused ? Color.blogPeach.opacity(0.14) : nil,
+            fallbackFill: .blogField,
+            fallbackStroke: isFocused ? Color.blogPeach.opacity(0.6) : .blogStroke
         )
         .animation(.easeOut(duration: 0.14), value: isFocused)
     }
@@ -472,13 +784,21 @@ struct OperationStatus: View {
 }
 
 private extension View {
+    @ViewBuilder
     func toastBackground(_ tint: Color) -> some View {
-        padding(.horizontal, 13)
-            .padding(.vertical, 9)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(tint.opacity(0.35)))
-            .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+        if #available(macOS 26.0, *) {
+            padding(.horizontal, 14)
+                .padding(.vertical, 9.5)
+                .glassEffect(.regular.tint(tint.opacity(0.22)), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        } else {
+            padding(.horizontal, 13)
+                .padding(.vertical, 9)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(tint.opacity(0.35)))
+                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
     }
 }
 

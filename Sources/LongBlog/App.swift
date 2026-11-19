@@ -136,14 +136,17 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                                   backing: .buffered, defer: false)
             window.title = "longBlog"
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .visible
+            window.toolbarStyle = .unified
             window.isReleasedWhenClosed = false
             window.isRestorable = false
             window.tabbingMode = .disallowed
             window.minSize = NSSize(width: 1020, height: 660)
             window.backgroundColor = .lbBackground
-            window.contentView = NSHostingView(rootView: RootView())
+            let host = NSHostingController(rootView: RootView())
+            host.preferredContentSize = NSSize(width: 1280, height: 800)
+            window.contentViewController = host
+            window.setContentSize(NSSize(width: 1280, height: 800))
             window.center()
             if !ProcessInfo.processInfo.arguments.contains("--smoke-test") {
                 window.setFrameAutosaveName("LongBlogWorkspace")

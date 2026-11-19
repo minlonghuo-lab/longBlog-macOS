@@ -85,6 +85,19 @@ static NSString *decodeValue(NSString *raw) {
   l.raw = [NSString stringWithFormat:@"%@=%@", key, quoted];
   return nil;
 }
+- (NSString *)publicSnapshotText {
+  if (_parseError) return nil;
+  NSMutableArray *publicLines = [NSMutableArray arrayWithObject:@"# 本地公开配置"];
+  for (LBEnvLine *line in _lines) {
+    if (![line.key hasPrefix:@"PUBLIC_"]) continue;
+    NSTextCheckingResult *match = [lineRegex() firstMatchInString:line.raw options:0 range:NSMakeRange(0,line.raw.length)];
+    if (!match) return nil;
+    NSRange encoded = [match rangeAtIndex:2];
+    NSString *value = encoded.location == NSNotFound ? @"" : [line.raw substringWithRange:encoded];
+    [publicLines addObject:[NSString stringWithFormat:@"%@=%@", line.key, value]];
+  }
+  return [publicLines componentsJoinedByString:@"\n"];
+}
 - (NSString *)serialize {
   NSMutableArray *a = [NSMutableArray arrayWithCapacity:_lines.count];
   for (LBEnvLine *l in _lines) [a addObject:l.raw];

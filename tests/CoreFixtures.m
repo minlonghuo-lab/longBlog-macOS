@@ -1,15 +1,170 @@
-// Native macOS fixture executable. No network, real Keychain, standard defaults,
-// singleton stores, or user note folders are accessed. All IO is temporary.
+// Native fixtures use temporary note folders and simulated Security.framework items.
+// The isolated credential-slot preference is removed after the test.
 #import "LongBlog-Bridging-Header.h"
 #include <stdio.h>
 #include <stdlib.h>
+#import <Security/Security.h>
+#import <objc/runtime.h>
+#import <LocalAuthentication/LocalAuthentication.h>
 
 static NSUInteger checks;
 #define CHECK(...) do { checks++; if (!(__VA_ARGS__)) { \
   fprintf(stderr, "Core fixture failed at %s:%d: %s\n", __FILE__, __LINE__, #__VA_ARGS__); abort(); \
 } } while (0)
 
+// This fixture executable replaces the Security.framework read at link time.
+// No credentials are read; a blocked quiet request can be retried explicitly.
+static NSUInteger fixtureSecretReads;
+static BOOL fixtureKeychainUnlocked;
+static NSMutableDictionary<NSString *, NSData *> *fixtureItems;
+static NSString *fixtureAccount;
+static void CheckQuietMode(void) {
+  Boolean allowed = true;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  CHECK(SecKeychainGetUserInteractionAllowed(&allowed) == errSecSuccess && !allowed);
+#pragma clang diagnostic pop
+}
+OSStatus SecItemAdd(CFDictionaryRef attributes, CFTypeRef *result) {
+  NSDictionary *query = (__bridge NSDictionary *)attributes;
+  NSString *account = query[(__bridge id)kSecAttrAccount];
+  CHECK(fixtureAccount && [account hasPrefix:[fixtureAccount stringByAppendingString:@"."]]);
+  CheckQuietMode();
+  fixtureItems[account] = query[(__bridge id)kSecValueData];
+  return errSecSuccess;
+}
+OSStatus SecItemDelete(CFDictionaryRef attributes) {
+  NSString *account = ((__bridge NSDictionary *)attributes)[(__bridge id)kSecAttrAccount];
+  CHECK(fixtureItems[account] != nil);
+  CheckQuietMode();
+  [fixtureItems removeObjectForKey:account];
+  return errSecSuccess;
+}
+OSStatus SecItemCopyMatching(CFDictionaryRef attributes, CFTypeRef *result) {
+  NSDictionary *query = (__bridge NSDictionary *)attributes;
+  NSString *account = query[(__bridge id)kSecAttrAccount];
+  CHECK([account isEqual:@"offline-fixture-token"] || [account hasPrefix:fixtureAccount ?: @"offline-fixture-token"]);
+  fixtureSecretReads++;
+  LAContext *context = query[(__bridge id)kSecUseAuthenticationContext];
+  CHECK(context.interactionNotAllowed);
+  Boolean allowed = true;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  CHECK(SecKeychainGetUserInteractionAllowed(&allowed) == errSecSuccess && !allowed);
+#pragma clang diagnostic pop
+  if (fixtureItems) {
+    NSData *item = fixtureItems[account];
+    if (!item) return errSecInteractionNotAllowed; // old build has an inaccessible item
+    *result = CFBridgingRetain(item); return errSecSuccess;
+  }
+  if (!fixtureKeychainUnlocked) return errSecInteractionNotAllowed;
+  *result = CFBridgingRetain([@"fixture" dataUsingEncoding:NSUTF8StringEncoding]);
+  return errSecSuccess;
+}
+static void QuietCredentialFixtures(void) {
+  CHECK([LBKeychain getWithoutPrompt:@"offline-fixture-token"] == nil);
+  CHECK([LBKeychain get:@"offline-fixture-token"] == nil);
+  fixtureKeychainUnlocked = YES;
+  CHECK([[LBKeychain get:@"offline-fixture-token"] isEqual:@"fixture"]);
+  CHECK([[LBKeychain getWithoutPrompt:@"offline-fixture-token"] isEqual:@"fixture"]);
+  CHECK(fixtureSecretReads == 3);
+  fixtureItems = [NSMutableDictionary dictionary];
+  fixtureAccount = [@"fixture-" stringByAppendingString:NSUUID.UUID.UUIDString];
+  NSString *key = [@"LBCredentialSlot." stringByAppendingString:fixtureAccount];
+  @try {
+    [LBKeychain set:@"first input" account:fixtureAccount];
+    NSString *slot = [NSUserDefaults.standardUserDefaults stringForKey:key];
+    CHECK(slot && fixtureItems[slot]);
+    CHECK([[LBKeychain getWithoutPrompt:fixtureAccount] isEqual:@"first input"]);
+    [LBKeychain set:@"replacement" account:fixtureAccount];
+    CHECK(fixtureItems.count == 1 && !fixtureItems[slot]);
+    CHECK([[LBKeychain get:fixtureAccount] isEqual:@"replacement"]);
+    [LBKeychain set:@"" account:fixtureAccount];
+    CHECK(fixtureItems.count == 0 && ![LBKeychain get:fixtureAccount]);
+  } @finally {
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:key];
+  }
+}
+
+@interface OfflineGit : LBGitHub
+@property NSUInteger blobReads;
+@end
+@implementation OfflineGit
+- (NSString *)frozenRepository { return @"example/blog"; }
+- (void)headCommit:(void (^)(NSDictionary *, NSError *))done { done(@{@"treeSHA":@"tree"}, nil); }
+- (void)request:(NSString *)method suffix:(NSString *)suffix body:(NSDictionary *)body done:(void (^)(NSDictionary *, NSError *))done {
+  CHECK([method isEqual:@"GET"] && [suffix isEqual:@"/git/trees/tree"]);
+  done(@{@"tree":@[@{@"path":@".env", @"sha":[@"a" stringByPaddingToLength:40 withString:@"a" startingAtIndex:0], @"type":@"blob", @"mode":@"100644"}]},nil);
+}
+- (void)getBlobData:(NSString *)sha done:(void (^)(NSData *, NSError *))done {
+  self.blobReads++; done([@"PUBLIC_SITE_TITLE=test" dataUsingEncoding:NSUTF8StringEncoding], nil);
+}
+@end
+
+@interface OfflineMemos : LBMemosClient
+@property (copy) NSArray *responseRows;
+@property NSInteger responseStatus;
+@property (copy) NSString *receivedValidator;
+@end
+@implementation OfflineMemos
+- (NSError *)ready { return nil; }
+- (NSDictionary *)user { return @{@"id":@42}; }
+- (NSURLSessionTask *)request:(NSString *)method path:(NSString *)path query:(NSArray *)query json:(id)json
+                    bodyFile:(NSURL *)file contentType:(NSString *)type download:(NSURL *)url mutation:(BOOL)mutation
+                    progress:(void (^)(double))progress validator:(NSString *)validator done:(void (^)(id,NSInteger,NSError *))done {
+  CHECK([method isEqual:@"GET"] && [path isEqual:@"/api/v1/memo"] && !mutation);
+  self.receivedValidator = validator; done(self.responseRows, self.responseStatus, nil); return nil;
+}
+@end
+
+static void MemoCacheFixtures(NSURL *temporary) {
+  NSURL *dir = [temporary URLByAppendingPathComponent:@"account"];
+  NSURL *metadata = [dir URLByAppendingPathComponent:@"snapshot.json"];
+  LBMemosDiskCache *(^makeCache)(void) = ^{
+    LBMemosDiskCache *cache = [[LBMemosDiskCache alloc] initWithBase:@"https://example.invalid" userID:@42];
+    [cache setValue:dir forKey:@"root"]; [cache setValue:metadata forKey:@"metadata"];
+    [cache setValue:[dir URLByAppendingPathComponent:@"originals"] forKey:@"files"]; return cache;
+  };
+  NSDictionary *latest = @{@"id":@2,@"creatorId":@42,@"content":@"latest", @"visibility":@"PRIVATE",@"rowStatus":@"NORMAL",
+      @"createdTs":@2,@"updatedTs":@2,@"displayTs":@2,@"pinned":@NO,@"resourceList":@[],@"tagList":@[]};
+  NSMutableDictionary *older = [latest mutableCopy]; older[@"id"] = @1;
+  NSArray *before = @[latest, [older copy]];
+  LBMemosDiskCache *cache = makeCache();
+  void (^waitForIO)(void (^)(void (^)(NSError *))) = ^(void (^operation)(void (^)(NSError *))) {
+    __block BOOL complete = NO;
+    operation(^(NSError *e){ CHECK(!e); complete = YES; });
+    NSDate *limit = [NSDate dateWithTimeIntervalSinceNow:4];
+    while (!complete && limit.timeIntervalSinceNow > 0) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
+    CHECK(complete);
+  };
+  waitForIO(^(void (^done)(NSError *)){ [cache replaceState:@"NORMAL" rows:before validator:@"v1" done:done]; });
+  LBMemosDiskCache *cold = makeCache();
+  waitForIO(^(void (^done)(NSError *)){ [cold load:done]; });
+  CHECK([cold.snapshots[@"NORMAL"] isEqual:before] && [cold.validators[@"NORMAL"] isEqual:@"v1"]);
+  OfflineMemos *client = [OfflineMemos new]; [client setValue:cold forKey:@"diskCache"];
+  client.responseStatus = 304;
+  [client allState:@"NORMAL" text:@"" tag:@"" done:^(NSArray *rows, NSError *e){ CHECK(!e && [rows isEqual:before]); }];
+  CHECK([client.receivedValidator isEqual:@"v1"]);
+  older[@"content"] = @"edited older memo"; client.responseRows = @[latest, [older copy]]; client.responseStatus = 200;
+  [client allState:@"NORMAL" text:@"" tag:@"" done:^(NSArray *rows, NSError *e){ CHECK(!e && [rows.lastObject[@"content"] isEqual:@"edited older memo"]); }];
+  CHECK(cold.validators[@"NORMAL"] == nil);
+  client.responseRows = @[];
+  [client allState:@"NORMAL" text:@"" tag:@"" done:^(NSArray *rows, NSError *e){ CHECK(!e && rows.count == 0); }];
+  // The reload queues behind prior snapshot writes, including the empty state.
+  LBMemosDiskCache *empty = makeCache();
+  waitForIO(^(void (^done)(NSError *)){ [empty load:done]; });
+  CHECK([empty.snapshots[@"NORMAL"] isEqual:@[]] && !empty.snapshots[@"ARCHIVED"]);
+}
+
 static void EnvFixtures(void) {
+  OfflineGit *git = [OfflineGit new]; __block NSString *blob;
+  [git checkEnvSinceBlob:nil done:^(NSString *text, NSString *sha, NSError *e){ CHECK(!e && text.length); blob = sha; }];
+  [git checkEnvSinceBlob:blob done:^(NSString *text, NSString *sha, NSError *e){ CHECK(!e && !text && [sha isEqual:blob]); }];
+  CHECK(git.blobReads == 1);
+  NSString *publicText = [LBEnvFile parse:@"PRIVATE_KEY=secret-one\n# secret-two\nPUBLIC_SITE_TITLE='site # title' # secret-three"].publicSnapshotText;
+  CHECK(![publicText containsString:@"secret"] && ![publicText containsString:@"PRIVATE_KEY"]);
+  CHECK([[[LBEnvFile parse:publicText] valueFor:@"PUBLIC_SITE_TITLE"] isEqual:@"site # title"]);
+
   NSString *original = @"# untouched comment\r\nexport PUBLIC_SITE_TITLE='first' # keep\r\nPUBLIC_SITE_TITLE=last\r\nPUBLIC_SITE_AUTHOR=author\r\nPUBLIC_SITE_URL=https://example.invalid\r\nPUBLIC_FOOTER_SHOW_RUNTIME=false\r\n";
   LBEnvFile *env = [LBEnvFile parse:original];
   CHECK([[env serialize] isEqual:original]);
@@ -90,6 +245,70 @@ static void PureBoundaryFixtures(void) {
   // Deliberately do not call LBKeychain or client singletons: no credentials.
 }
 
+@interface LBWorkspacePresenter : NSObject <NSFilePresenter>
+- (instancetype)initWithURL:(NSURL *)url;
+@property (nonatomic) BOOL active;
+@end
+
+static void WorkspaceObserverFixture(NSURL *folder) {
+  LBWorkspacePresenter *presenter = [[LBWorkspacePresenter alloc] initWithURL:folder];
+  presenter.active = YES;
+  __block BOOL changed = NO;
+  id observer = [NSNotificationCenter.defaultCenter addObserverForName:@"LBWorkspaceFilesDidChange"
+      object:folder queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note){ changed = YES; }];
+  [NSFileCoordinator addFilePresenter:presenter];
+  NSURL *url = [folder URLByAppendingPathComponent:@"change.md"];
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+    [[[NSFileCoordinator alloc] initWithFilePresenter:nil] coordinateWritingItemAtURL:url options:0 error:nil
+        byAccessor:^(NSURL *file){ [@"external edit" writeToURL:file atomically:YES encoding:NSUTF8StringEncoding error:nil]; }];
+  });
+  NSDate *end = [NSDate dateWithTimeIntervalSinceNow:5];
+  while (!changed && end.timeIntervalSinceNow > 0)
+    [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+  [NSFileCoordinator removeFilePresenter:presenter];
+  presenter.active = NO;
+  [NSNotificationCenter.defaultCenter removeObserver:observer];
+  CHECK(changed);
+}
+
+static void DashboardFixture(void) {
+  // Simulate independent services so this also works offline and with a locked login keychain.
+  Method json = class_getClassMethod(LBHTTP.class, @selector(JSON:url:headers:body:done:));
+  Method cert = class_getClassMethod(LBHTTP.class, @selector(certificateExpiry:done:));
+  Method configured = class_getInstanceMethod(LBGitHub.class, @selector(configured));
+  Method head = class_getInstanceMethod(LBGitHub.class, @selector(headCommit:));
+  Method env = class_getInstanceMethod(LBGitHub.class, @selector(checkEnvSinceBlob:done:));
+  Method hosts = class_getClassMethod(LBStore.class, @selector(certHosts));
+  IMP jsonStub = imp_implementationWithBlock(^(id obj, NSString *method, NSURL *url, NSDictionary *headers, NSDictionary *body, void (^done)(id,NSInteger,NSError *)){
+    NSDictionary *fixtures = @{@"snapshot.json":@{@"memos":@[@{@"content":@"fixture"}]},
+        @"version.json":@{@"checkedAt":@12345}, @"build-info.json":@{@"schemaVersion":@1,@"builtAt":@"2026-01-01T00:00:00Z",@"commit":@"fixture"}};
+    CHECK(fixtures[url.lastPathComponent] != nil);
+    done(fixtures[url.lastPathComponent],200,nil);
+  });
+  IMP certStub = imp_implementationWithBlock(^(id obj, NSString *host, void (^done)(NSDate *,NSError *)){ done([NSDate dateWithTimeIntervalSinceNow:864000],nil); });
+  IMP configuredStub = imp_implementationWithBlock(^BOOL(id obj){ return YES; });
+  IMP headStub = imp_implementationWithBlock(^(id obj, void (^done)(NSDictionary *,NSError *)){ done(@{@"sha":@"fixture"},nil); });
+  IMP envStub = imp_implementationWithBlock(^(id obj, NSString *known, void (^done)(NSString *,NSString *,NSError *)){ done(@"PUBLIC_FRIEND_1_NAME=Example", @"fixture", nil); });
+  IMP hostsStub = imp_implementationWithBlock(^NSArray *(id obj){ return @[@"fixture.invalid"]; });
+  Method methods[] = {json,cert,configured,head,env,hosts};
+  IMP stubs[] = {jsonStub,certStub,configuredStub,headStub,envStub,hostsStub};
+  IMP originals[6];
+  for (int i=0; i<6; i++) originals[i] = method_setImplementation(methods[i],stubs[i]);
+  @try {
+    LBSiteData *site = [LBSiteData new];
+    __block BOOL finished = NO;
+    [site refreshDashboardForUserAction:NO done:^{ finished = YES; }];
+    NSDate *end = [NSDate dateWithTimeIntervalSinceNow:3];
+    while (!finished && end.timeIntervalSinceNow > 0) [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    CHECK(finished && site.memos.count == 1 && [site.memosVersion[@"checkedAt"] isEqual:@12345]);
+    CHECK([LBEnvFile parse:site.envText].friendIndexes.count == 1);
+    CHECK([site.head[@"sha"] isEqual:@"fixture"] && [site.build[@"commit"] isEqual:@"fixture"]);
+    CHECK([site.certs[@"fixture.invalid"] isKindOfClass:NSDate.class]);
+  } @finally {
+    for (int i=0; i<6; i++) { method_setImplementation(methods[i],originals[i]); imp_removeBlock(stubs[i]); }
+  }
+}
+
 static void WorkspaceFixtures(NSURL *root) {
   NSFileManager *fm = NSFileManager.defaultManager;
   NSError *error = nil;
@@ -111,9 +330,36 @@ static void WorkspaceFixtures(NSURL *root) {
   CHECK([articleURL.path hasPrefix:[root.path stringByAppendingString:@"/"]]);
   CHECK([[store articleDirectoryURLForNote:note].path isEqual:articleURL.URLByDeletingLastPathComponent.path]);
   CHECK([store resourceURLForLocalPath:[note stringByAppendingString:@".md"]] == nil); // asset resolver is intentionally asset-only
+  NSURL *index = [[root.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"index"] URLByAppendingPathComponent:@"posts.plist"];
+  NSArray *first = [store listArticlesWithIndexAtURL:index];
+  CHECK([first isEqual:[store cachedArticleListAtURL:index]]);
+  NSDate *mtime = [fm attributesOfItemAtPath:index.path error:nil][NSFileModificationDate];
+  CHECK([[store listArticlesWithIndexAtURL:index] isEqual:first]);
+  CHECK([mtime isEqual:[fm attributesOfItemAtPath:index.path error:nil][NSFileModificationDate]]);
+  // Two independent editors open the same bytes before either saves.
+  LBMdStore *second = [[LBMdStore alloc] initWithLocalFolderURL:root error:&error];
+  NSString *base = [second loadArticle:note][@"sourceRevision"];
+  CHECK(base.length == 64 && [base isEqual:loaded[@"sourceRevision"]]);
+  NSDictionary *winner = nil;
+  CHECK([store saveArticleWithId:note title:@"First device" markdown:@"version A" summary:nil publish:NO tags:nil expectedRevision:base savedPost:&winner error:&error]);
+  CHECK(![winner[@"sourceRevision"] isEqual:base]);
+  CHECK([[second loadArticle:note][@"markdown"] containsString:@"version A"]);
+  CHECK(![second saveArticleWithId:note title:@"Concurrent draft" markdown:@"version B" summary:nil publish:NO tags:nil expectedRevision:base savedPost:nil error:&error]);
+  CHECK(error.code == 409);
+  CHECK([[store loadArticle:note][@"sourceRevision"] isEqual:winner[@"sourceRevision"]]);
+  NSURL *copies = [[root URLByAppendingPathComponent:@"冲突副本"] URLByAppendingPathComponent:note];
+  NSArray *copyFiles = [fm contentsOfDirectoryAtURL:copies includingPropertiesForKeys:nil options:0 error:&error];
+  CHECK(copyFiles.count == 1);
+  CHECK([[NSString stringWithContentsOfURL:copyFiles.firstObject encoding:NSUTF8StringEncoding error:&error] containsString:@"version B"]);
+  CHECK([second saveArticleWithId:note title:@"Second device" markdown:@"version C" summary:nil publish:NO tags:nil expectedRevision:winner[@"sourceRevision"] savedPost:nil error:&error]);
+  CHECK([[store loadArticle:note][@"markdown"] containsString:@"version C"]);
   NSString *created = loaded[@"createdAtString"];
   CHECK([store saveArticleWithId:note title:@"Renamed" markdown:@"Changed body\n" summary:nil publish:NO tags:nil error:&error]);
   CHECK([[[store loadArticle:note] objectForKey:@"createdAtString"] isEqual:created]);
+  CHECK([[[store listArticlesWithIndexAtURL:index] firstObject][@"title"] isEqual:@"Renamed"]);
+  NSURL *other = [root.URLByDeletingLastPathComponent URLByAppendingPathComponent:@"other"];
+  [fm createDirectoryAtURL:other withIntermediateDirectories:YES attributes:nil error:nil];
+  CHECK([[[LBMdStore alloc] initWithLocalFolderURL:other error:nil] cachedArticleListAtURL:index] == nil);
   CHECK(store.listArticles.count == 1);
   for (NSString *unsafe in @[@"../escape", @"/absolute", @"a/b", @"bad%2Fname", @"bad\\name", @".hidden"]) {
     error = nil;
@@ -140,6 +386,7 @@ static void WorkspaceFixtures(NSURL *root) {
   CHECK(([[fm attributesOfItemAtPath:asset.path error:NULL][NSFilePosixPermissions] unsignedIntegerValue] & 0777) == 0600);
   CHECK(LBProtectLocalURL(assets, &error));
   CHECK(([[fm attributesOfItemAtPath:assets.path error:NULL][NSFilePosixPermissions] unsignedIntegerValue] & 0777) == 0700);
+  WorkspaceObserverFixture(root);
 }
 
 int main(void) {
@@ -147,8 +394,9 @@ int main(void) {
     NSURL *temporary = [[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES] URLByAppendingPathComponent:[@"longblog-core-fixtures-" stringByAppendingString:NSUUID.UUID.UUIDString] isDirectory:YES];
     int status = 0;
     @try {
-      EnvFixtures(); FrontmatterFixtures(); PureBoundaryFixtures();
+      QuietCredentialFixtures(); DashboardFixture(); EnvFixtures(); FrontmatterFixtures(); PureBoundaryFixtures();
       WorkspaceFixtures([temporary URLByAppendingPathComponent:@"Posts" isDirectory:YES]);
+      MemoCacheFixtures(temporary);
       printf("CoreFixtures: %lu assertions passed (offline; temporary workspace only).\n", (unsigned long)checks);
     } @catch (NSException *exception) {
       fprintf(stderr, "CoreFixtures raised %s: %s\n", exception.name.UTF8String, exception.reason.UTF8String);

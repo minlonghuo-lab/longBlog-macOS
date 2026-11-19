@@ -40,18 +40,38 @@ struct ReaderView: NSViewRepresentable {
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.setURLSchemeHandler(context.coordinator.resources, forURLScheme: ReaderResources.scheme)
+        // Synchronously stamp the initial theme before first paint so dark/light never flashes on cold load.
+        let initialTheme = (paperTheme == "paper" || paperTheme == "dark") ? paperTheme : "auto"
+        let themeScript = WKUserScript(
+            source: "document.documentElement.setAttribute('data-theme', '\(initialTheme)');",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        configuration.userContentController.addUserScript(themeScript)
         // No script message handlers, credentials, cookies, or native command bridge.
         let view = WKWebView(frame: .zero, configuration: configuration)
+        view.setValue(false, forKey: "drawsBackground")
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
         view.allowsBackForwardNavigationGestures = false
-        view.underPageBackgroundColor = .clear
+        view.focusRingType = .none
+        view.underPageBackgroundColor = Self.background(for: paperTheme)
         context.coordinator.live = live
         context.coordinator.update(markdown: markdown, format: bodyFormat, root: baseDirectory, title: title, theme: paperTheme, in: view)
         return view
     }
 
+    private static let paper = NSColor(srgbRed: 246/255, green: 239/255, blue: 230/255, alpha: 1)
+    private static let espresso = NSColor(srgbRed: 37/255, green: 30/255, blue: 26/255, alpha: 1)
+    private static let automaticBackground = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? espresso : paper
+    }
+    private static func background(for theme: String) -> NSColor {
+        switch theme { case "dark": return espresso; case "paper": return paper; default: return automaticBackground }
+    }
     func updateNSView(_ nsView: WKWebView, context: Context) {
+        let background = Self.background(for: paperTheme)
+        if nsView.underPageBackgroundColor != background { nsView.underPageBackgroundColor = background }
         context.coordinator.live = live
         context.coordinator.update(markdown: markdown, format: bodyFormat, root: baseDirectory, title: title, theme: paperTheme, in: nsView)
         if let fraction = scrollFraction { context.coordinator.scroll(to: fraction, in: nsView) }
@@ -88,6 +108,7 @@ struct ReaderView: NSViewRepresentable {
         func update(markdown: String, format: BodyFormat, root: URL?, title: String = "", theme: String = "auto", in view: WKWebView) {
             guard currentBody != markdown || currentFormat != format || currentRoot != root || currentTitle != title || currentTheme != theme || (!ready && documentNavigation == nil) else { return }
             let rootChanged = currentRoot != root
+            if rootChanged { lastFraction = nil }
             let bodyChanged = currentBody != markdown
             let firstBody = currentBody == nil
             currentTitle = title
@@ -97,8 +118,9 @@ struct ReaderView: NSViewRepresentable {
             currentRoot = root
             revision += 1
             resources.setArticleRoot(root)
-            // A fresh document drops old image caches and pending diagram work on root changes.
-            if (!ready && documentNavigation == nil) || rootChanged {
+            // The scheme handler rotates the resource host for every article.
+            // Keep the document alive and swap the sanitized body in one paint.
+            if !ready && documentNavigation == nil {
                 pendingRender?.cancel()
                 ready = false
                 documentNavigation = view.load(URLRequest(url: ReaderResources.documentURL, cachePolicy: .reloadIgnoringLocalCacheData))
@@ -106,7 +128,7 @@ struct ReaderView: NSViewRepresentable {
                 pendingRender?.cancel()
                 // Live typing: coalesce keystrokes so KaTeX / Mermaid are not rebuilt per character.
                 // Theme or title switches render immediately without debounce delay.
-                guard live, !firstBody, bodyChanged else { render(in: view); return }
+                guard live, !rootChanged, !firstBody, bodyChanged else { render(in: view); return }
                 let work = DispatchWorkItem { [weak self, weak view] in if let self = self, let view = view { self.render(in: view) } }
                 pendingRender = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: work)

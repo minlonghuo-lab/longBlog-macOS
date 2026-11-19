@@ -84,7 +84,6 @@ struct StagingReviewView: View {
         .frame(width: 740, height: 600)
         .foregroundStyle(Color.blogText)
         .background(Color.blogBackground)
-        .tint(.blogPeach)
         .interactiveDismissDisabled(model.busy)
     }
 
@@ -371,7 +370,6 @@ struct ConfigurationWorkspace: View {
         .frame(width: 780, height: 620)
         .foregroundStyle(Color.blogText)
         .background(Color.blogBackground)
-        .tint(.blogPeach)
         .interactiveDismissDisabled(model.busy)
     }
 }

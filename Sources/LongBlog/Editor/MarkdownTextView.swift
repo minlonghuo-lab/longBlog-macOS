@@ -104,6 +104,15 @@ final class MarkdownGutterView: NSRulerView {
     @available(*, unavailable)
     required init(coder: NSCoder) { fatalError() }
 
+    override func draw(_ dirtyRect: NSRect) {
+        let clipped = dirtyRect.intersection(bounds)
+        guard !clipped.isEmpty else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: bounds).addClip()
+        drawHashMarksAndLabels(in: clipped)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let textView = editorView,
               let layout = textView.layoutManager,
@@ -113,9 +122,12 @@ final class MarkdownGutterView: NSRulerView {
         let s = textView.nsString
         guard s.length <= 400_000 else { return }
 
-        // Subtle right separator line matching the warm studio gutter.
+        let drawRect = rect.intersection(bounds)
+        guard !drawRect.isEmpty else { return }
+
+        // Subtle right separator line matching the warm studio gutter, strictly clipped to bounds.
         NSColor.lbMuted.withAlphaComponent(0.12).setFill()
-        NSRect(x: bounds.maxX - 1, y: rect.minY, width: 1, height: rect.height).fill()
+        NSRect(x: bounds.maxX - 1, y: drawRect.minY, width: 1, height: drawRect.height).fill()
 
         let origin = textView.textContainerOrigin
         let visibleInContainer = clip.bounds.offsetBy(dx: -origin.x, dy: -origin.y)
@@ -674,6 +686,9 @@ struct MarkdownTextEditor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
         scroll.drawsBackground = false
+        scroll.clipsToBounds = true
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
@@ -712,6 +727,7 @@ struct MarkdownTextEditor: NSViewRepresentable {
         scroll.documentView = textView
 
         let gutter = MarkdownGutterView(scrollView: scroll, textView: textView)
+        gutter.clipsToBounds = true
         scroll.verticalRulerView = gutter
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = showLineNumbers

@@ -170,7 +170,7 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
     _transfers = [NSMutableDictionary dictionary]; _ownedResourceIDs = [NSMutableSet set]; _temporaryFiles = [NSMutableSet set]; _generation = 1;
     _cacheDownloads = [NSMutableDictionary dictionary]; _cacheResources = [NSMutableDictionary dictionary];
     _cacheFailures = [NSMutableSet set]; _cacheCompleted = [NSMutableSet set]; _cacheVerifiedStates = [NSMutableDictionary dictionary];
-    dispatch_async(dispatch_get_main_queue(), ^{ [self cacheLoadBoundIdentity]; });
+
   } return self;
 }
 - (NSString *)baseURL { return LBOnMain(^id{ return self->_baseURL; }); }
@@ -186,6 +186,7 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
     NSString *normalized = LBBase([base stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]);
     NSString *key = [token ?: @"" stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
     if (!normalized || [key rangeOfCharacterFromSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].location != NSNotFound) return @NO;
+    if (![self->_baseURL isEqual:normalized] || ![([LBKeychain get:@"memos-token"] ?: @"") isEqual:key]) [LBMemosDiskCache clearOfflineBinding];
     [LBKeychain set:key account:@"memos-token"];
     if (![([LBKeychain get:@"memos-token"] ?: @"") isEqual:key]) { self.keychainFailed = YES; return @NO; }
     // Both values are committed BEFORE any synchronous reset observer runs.
@@ -201,6 +202,7 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
     NSString *t = LBString(value) ? [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"";
     NSString *old = [LBKeychain get:@"memos-token"] ?: @"";
     if (![old isEqual:t] || self.keychainFailed) {
+      [LBMemosDiskCache clearOfflineBinding];
       [LBKeychain set:t account:@"memos-token"];
       self.keychainFailed = ![([LBKeychain get:@"memos-token"] ?: @"") isEqual:t];
       self.authenticationRequired = NO;
@@ -230,8 +232,7 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
   for (NSURL *url in self.temporaryFiles) [NSFileManager.defaultManager removeItemAtURL:url error:NULL];
   [self.temporaryFiles removeAllObjects]; [self.ownedResourceIDs removeAllObjects];
   // Deliberately never delete account-scoped drafts on reset/token changes.
-  [self cacheLoadBoundIdentity];
-  [NSNotificationCenter.defaultCenter postNotificationName:LBMemosDidChange object:self userInfo:nil];
+  [NSNotificationCenter.defaultCenter postNotificationName:LBMemosDidChange object:self userInfo:@{@"reset":@YES}];
 }
 - (NSError *)ready {
   if (!self.configured) return LBErr(1001, @"请配置有效的 HTTPS 根地址和独立 Memos 令牌，并确认钥匙串保存成功。");
@@ -248,6 +249,9 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
   [NSFileManager.defaultManager createFileAtPath:url.path contents:nil attributes:@{NSFilePosixPermissions:@0600}]; LBProtect(url); return url;
 }
 - (NSURLSessionTask *)request:(NSString *)method path:(NSString *)path query:(NSArray<NSURLQueryItem *> *)query json:(id)json bodyFile:(NSURL *)bodyFile contentType:(NSString *)type download:(NSURL *)output mutation:(BOOL)mutation progress:(void (^)(double))progress done:(void (^)(id, NSInteger, NSError *))done {
+  return [self request:method path:path query:query json:json bodyFile:bodyFile contentType:type download:output mutation:mutation progress:progress validator:nil done:done];
+}
+- (NSURLSessionTask *)request:(NSString *)method path:(NSString *)path query:(NSArray<NSURLQueryItem *> *)query json:(id)json bodyFile:(NSURL *)bodyFile contentType:(NSString *)type download:(NSURL *)output mutation:(BOOL)mutation progress:(void (^)(double))progress validator:(NSString *)etag done:(void (^)(id, NSInteger, NSError *))done {
   NSAssert(NSThread.isMainThread, @"Main queue confinement");
   if (!self.configured) { done(nil, 0, LBErr(1001, @"Memos 连接配置无效。")); return nil; }
   if (!self.session) {
@@ -262,6 +266,7 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
   [r setValue:[@"Bearer " stringByAppendingString:self.token] forHTTPHeaderField:@"Authorization"];
   [r setValue:@"application/json" forHTTPHeaderField:@"Accept"]; [r setValue:@"no-store" forHTTPHeaderField:@"Cache-Control"];
   if (json) { r.HTTPBody = [NSJSONSerialization dataWithJSONObject:json options:0 error:NULL]; [r setValue:@"application/json" forHTTPHeaderField:@"Content-Type"]; }
+  if (etag.length) [r setValue:etag forHTTPHeaderField:@"If-None-Match"];
   if (type) [r setValue:type forHTTPHeaderField:@"Content-Type"];
   if (output) [r setValue:@"*/*" forHTTPHeaderField:@"Accept"];
   LBMemosTransfer *c = [LBMemosTransfer new]; c.generation = self.generation; c.epoch = self.epoch; c.mutation = mutation;
@@ -310,6 +315,9 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
   else if (!e && error) {
     if (error.code == NSURLErrorCancelled) e = LBErr(1008, c.mutation ? @"操作已取消，远端结果可能未知，请先刷新确认。" : @"操作已取消。");
     else e = LBErr(c.mutation ? 1010 : 1009, c.mutation ? @"UNKNOWN：远端结果未知。请先检查列表或详情，确认是否成功，再决定重试；不会自动重发。" : @"网络请求失败，请稍后重新加载。");
+  }
+  if (!e && c.status == 304 && [task.originalRequest valueForHTTPHeaderField:@"If-None-Match"].length) {
+    c.done(nil, 304, nil); return;
   }
   if (!e && (c.status < 200 || c.status >= 300)) {
     NSString *message;
@@ -401,7 +409,15 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
     [NSURLQueryItem queryItemWithName:@"rowStatus" value:state] ]];
   if (text.length) [query addObject:[NSURLQueryItem queryItemWithName:@"text" value:text]];
   if (tag.length) [query addObject:[NSURLQueryItem queryItemWithName:@"tag" value:tag]];
-  [self request:@"GET" path:@"/api/v1/memo" query:query json:nil bodyFile:nil contentType:nil download:nil mutation:NO progress:nil done:^(id raw, NSInteger status, NSError *e) {
+  BOOL complete = !text.length && !tag.length;
+  NSArray *baseline = complete ? self.diskCache.snapshots[state] : nil;
+  NSString *etag = baseline ? self.diskCache.validators[state] : nil;
+  __block NSURLSessionTask *task;
+  task = [self request:@"GET" path:@"/api/v1/memo" query:query json:nil bodyFile:nil contentType:nil download:nil mutation:NO progress:nil validator:etag done:^(id raw, NSInteger status, NSError *e) {
+    if (!e && status == 304 && baseline) {
+      if (self.cacheProofEpoch != self.epoch) { [self.cacheVerifiedStates removeAllObjects]; self.cacheProofEpoch = self.epoch; }
+      self.cacheVerifiedStates[state] = baseline; done(baseline, nil); return;
+    }
     if (!e && (![raw isKindOfClass:NSArray.class] || [raw count] > 10000)) e = LBErr(1006, @"完整列表过大或格式异常，未将部分结果当作总数。");
     NSMutableArray *rows = [NSMutableArray array]; NSMutableSet *ids = [NSMutableSet set];
     if (!e) for (id value in raw) {
@@ -413,9 +429,15 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
       if (self.cacheProofEpoch != self.epoch) { [self.cacheVerifiedStates removeAllObjects]; self.cacheProofEpoch = self.epoch; }
       self.cacheVerifiedStates[state] = [rows copy];
       LBMemosDiskCache *cache = self.diskCache;
-      [cache replaceState:state rows:rows done:^(NSError *cacheError) {
+      NSString *newTag = [(NSHTTPURLResponse *)task.response valueForHTTPHeaderField:@"ETag"];
+      [cache replaceState:state rows:rows validator:newTag done:^(NSError *cacheError) {
         if (cache != self.diskCache) return;
-        self.cacheError = cacheError; [self cacheNotify];
+        self.cacheError = cacheError;
+        if (!cacheError) {
+          [self cacheIndexResources];
+          if (self.cachePrefetching) { [self prefetchAllResources]; return; }
+        }
+        [self cacheNotify];
       }];
     }
     done(e ? nil : rows, e);
@@ -757,6 +779,26 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
     }];
   }];
 }
+- (void)offlineState:(NSString *)state done:(void (^)(NSArray *))done {
+  NSAssert(NSThread.isMainThread, @"Main queue confinement");
+  if (!LBState(state) || self.authenticationRequired) { done(nil); return; }
+  if (self.cacheLoaded) { done(self.diskCache.snapshots[state]); return; }
+  NSUInteger generation = self.generation;
+  NSString *base = LBBase(self.baseURL);
+  [LBMemosDiskCache loadOfflineBindingForBase:base done:^(NSNumber *uid) {
+    if (!uid || self.generation != generation || self.authenticationRequired) { done(nil); return; }
+    LBMemosDiskCache *reader = [[LBMemosDiskCache alloc] initWithBase:base userID:uid];
+    [reader load:^(NSError *e) {
+      if (e || self.generation != generation || self.authenticationRequired) { done(nil); return; }
+      if (!self.diskCache) {
+        // A read-only offline identity cannot authorize writes. validate: must
+        // compare the online account against this binding before setting user.
+        self.diskCache = reader; self.cacheLoaded = YES; [self cacheIndexResources];
+      }
+      done([self.diskCache.userID isEqual:uid] ? self.diskCache.snapshots[state] : nil);
+    }];
+  }];
+}
 - (void)cacheNotify {
   NSAssert(NSThread.isMainThread, @"Main queue confinement");
   [NSNotificationCenter.defaultCenter postNotificationName:LBMemosCacheDidChange object:self userInfo:[self cacheProgress]];
@@ -823,6 +865,7 @@ static void LBProtect(NSURL *url) { LBProtectLocalURL(url, NULL); }
 - (void)prefetchAllResources {
   LB_MAIN_RETURN([self prefetchAllResources]);
   if ([self ready] || !self.diskCache) return;
+  [self cacheIndexResources];
   // Explicit call/full sync retries failed files; the pump itself never retries
   // failures in a loop. No allState recursion, and ALL MIME types participate.
   self.cachePrefetching = YES; [self.cacheFailures removeAllObjects]; self.cacheError = nil;

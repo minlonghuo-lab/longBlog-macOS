@@ -25,6 +25,7 @@ struct InboxWorkspace: View {
                     }
                 }
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+                .animation(.easeInOut(duration: 0.18), value: model.archived)
                 .overlay(alignment: .bottom) { OperationStatus(model: model).padding(.bottom, 16) }
             }
         }
@@ -35,13 +36,20 @@ struct InboxWorkspace: View {
             HStack(spacing: 8) {
                 BlogSegmentedControl(
                     options: [
-                        SegmentedOption(value: false, label: "进行中", count: !model.archived && model.loaded ? model.sessions.count : nil),
-                        SegmentedOption(value: true, label: "归档记录", count: model.archived && model.loaded ? model.sessions.count : nil)
+                        SegmentedOption(value: false, label: "进行中"),
+                        SegmentedOption(value: true, label: "归档记录")
                     ],
                     selection: Binding(get: { model.archived }, set: { model.setArchived($0) }),
                     compact: true
                 )
-                .disabled(model.busy)
+                if model.loaded {
+                    Text("\(model.sessions.count)")
+                        .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Color.blogMuted)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Color.blogSlot, in: Capsule())
+                }
                 Spacer()
                 if model.unread > 0 && !model.archived {
                     StatusBadge(text: "\(model.unread) 未读", color: .blogPeach, pill: true)
@@ -52,31 +60,39 @@ struct InboxWorkspace: View {
 
             HairlineDivider()
 
-            if model.filtered.isEmpty {
-                EmptyWorkspace(
-                    symbol: "tray",
-                    title: model.search.isEmpty ? "暂无会话" : "没有匹配的会话",
-                    detail: model.errors.isEmpty && model.loaded
-                        ? (model.search.isEmpty ? "当前没有访客留言会话。" : "换个关键词试试。")
-                        : "点击右上角刷新或检查终端留言服务配置。",
-                    settings: !model.errors.isEmpty
-                )
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 9) {
-                        ForEach(model.filtered) { row in
-                            sessionCell(row)
+            ZStack {
+                if model.filtered.isEmpty {
+                    EmptyWorkspace(
+                        symbol: "tray",
+                        title: model.search.isEmpty ? "暂无会话" : "没有匹配的会话",
+                        detail: model.errors.isEmpty && model.loaded
+                            ? (model.search.isEmpty ? "当前没有访客留言会话。" : "换个关键词试试。")
+                            : "点击右上角刷新或检查终端留言服务配置。",
+                        settings: !model.errors.isEmpty
+                    )
+                    .id("empty-\(model.archived)")
+                    .transition(.opacity)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 9) {
+                            ForEach(model.filtered) { row in
+                                sessionCell(row)
+                            }
+                            if model.archived && !model.archiveCursor.isEmpty {
+                                Button("加载更多归档") { model.refresh(more: true) }
+                                    .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                                    .disabled(model.busy)
+                                    .padding(.vertical, 8)
+                            }
                         }
-                        if model.archived && !model.archiveCursor.isEmpty {
-                            Button("加载更多归档") { model.refresh(more: true) }
-                                .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                                .disabled(model.busy)
-                                .padding(.vertical, 8)
-                        }
+                        .padding(14)
                     }
-                    .padding(14)
+                    .id("list-\(model.archived)")
+                    .transition(.opacity)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.easeInOut(duration: 0.18), value: model.archived)
         }
     }
 

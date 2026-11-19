@@ -3,6 +3,7 @@ NS_ASSUME_NONNULL_BEGIN
 extern NSString *const LBMemosCacheDidChange;
 @interface LBMemosClient (LocalCache)
 // Synchronous protected-cache lookup, only for the verified base/user namespace.
+- (void)offlineState:(NSString *)state done:(void (^)(NSArray *_Nullable rows))done;
 - (nullable NSArray<NSDictionary *> *)cachedState:(NSString *)state;
 - (nullable NSURL *)cachedResource:(NSDictionary *)resource;
 - (void)invalidateCachedResource:(NSDictionary *)resource;

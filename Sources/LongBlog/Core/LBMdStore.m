@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <sys/stat.h>
 
 NSString *const LBMdStoreDidChange = @"LBMdStoreDidChange";
 
@@ -126,10 +127,29 @@ static NSURL *MDRawURL(NSURL *root, NSString *relative) {
 // recoverable if the process dies before/after that atomic switch. No user file is deleted.
 static NSString *MDLayoutName(void) { return @".longblog-layout.json"; }
 static NSURL *MDRawURL(NSURL *root, NSString *relative);
+// Legacy iCloud placeholders may exist before the logical file is materialized.
+static BOOL MDRequestPlaceholder(NSURL *url) {
+  if (!url) return NO;
+  NSString *name = [NSString stringWithFormat:@".%@.icloud", url.lastPathComponent];
+  NSURL *placeholder = [url.URLByDeletingLastPathComponent URLByAppendingPathComponent:name];
+  if (![NSFileManager.defaultManager fileExistsAtPath:placeholder.path]) return NO;
+  [NSFileManager.defaultManager startDownloadingUbiquitousItemAtURL:url error:nil];
+  return YES;
+}
+static NSDictionary *MDLayoutArticles(NSData *data) {
+  id obj = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+  if (![obj isKindOfClass:NSDictionary.class] || ![obj[@"version"] isEqual:@1] || ![obj[@"articles"] isKindOfClass:NSDictionary.class]) return nil;
+  for (NSString *note in obj[@"articles"]) {
+    NSString *path = obj[@"articles"][note];
+    NSArray *parts = [path isKindOfClass:NSString.class] ? [path componentsSeparatedByString:@"/"] : @[];
+    if (!MDID(note) || !MDPath(path) || parts.count != 2 || ![@[@"草稿", @"已发布"] containsObject:parts[0]] || ![parts[1] hasSuffix:[@"_" stringByAppendingString:note]]) return nil;
+  }
+  return obj[@"articles"];
+}
 static NSDictionary *MDLayout(NSURL *root) {
   NSURL *url = [root URLByAppendingPathComponent:MDLayoutName()];
   NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
-  if (!attrs) return @{};
+  if (!attrs) return MDRequestPlaceholder(url) ? nil : @{};
   if (![attrs[NSFileType] isEqual:NSFileTypeRegular]) return nil;
   static NSCache *cache; static dispatch_once_t once;
   dispatch_once(&once, ^{ cache = [NSCache new]; cache.countLimit = 8; });
@@ -140,15 +160,10 @@ static NSDictionary *MDLayout(NSURL *root) {
   NSDictionary *signature = @{@"inode":attrs[NSFileSystemFileNumber] ?: @0, @"size":attrs[NSFileSize] ?: @0, @"mtime":attrs[NSFileModificationDate] ?: @0, @"ctime":attrs[NSFileCreationDate] ?: @0};
   if ([cached[@"signature"] isEqual:signature]) return cached[@"articles"];
   NSData *data = [NSData dataWithContentsOfURL:url];
-  id obj = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-  if (![obj isKindOfClass:NSDictionary.class] || ![obj[@"version"] isEqual:@1] || ![obj[@"articles"] isKindOfClass:NSDictionary.class]) return nil;
-  for (NSString *note in obj[@"articles"]) {
-    NSString *path = obj[@"articles"][note];
-    NSArray *parts = [path isKindOfClass:NSString.class] ? [path componentsSeparatedByString:@"/"] : @[];
-    if (!MDID(note) || !MDPath(path) || parts.count != 2 || ![@[@"草稿", @"已发布"] containsObject:parts[0]] || ![parts[1] hasSuffix:[@"_" stringByAppendingString:note]]) return nil;
-  }
-  [cache setObject:@{@"signature":signature, @"articles":obj[@"articles"]} forKey:cacheKey];
-  return obj[@"articles"];
+  NSDictionary *articles = MDLayoutArticles(data);
+  if (!articles) return nil;
+  [cache setObject:@{@"signature":signature, @"articles":articles} forKey:cacheKey];
+  return articles;
 }
 static NSString *MDPhysical(NSURL *root, NSString *relative) {
   NSDictionary *layout = MDLayout(root); if (!layout) return nil;
@@ -171,6 +186,10 @@ static NSArray *MDArticleIDs(NSURL *root) {
   NSDictionary *layout = MDLayout(root); if (!layout) return @[];
   NSMutableSet *ids = [NSMutableSet setWithArray:layout.allKeys];
   for (NSString *file in [NSFileManager.defaultManager contentsOfDirectoryAtPath:root.path error:nil]) {
+    if ([file hasPrefix:@"."] && [file hasSuffix:@".md.icloud"]) {
+      NSString *logical = [file.stringByDeletingPathExtension substringFromIndex:1];
+      if (MDID(logical.stringByDeletingPathExtension)) MDRequestPlaceholder([root URLByAppendingPathComponent:logical]);
+    }
     if ([file.pathExtension isEqual:@"md"] && MDID(file.stringByDeletingPathExtension)) [ids addObject:file.stringByDeletingPathExtension];
   }
   return [ids.allObjects sortedArrayUsingSelector:@selector(compare:)];
@@ -695,12 +714,94 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
 - (void)start;
 @end
 
+// Disjoint additions commute. Different destinations for one ID require inspection
+// and retain both system versions, since their attachments may be different.
+static BOOL MDReconcileLayoutVersions(NSURL *root) {
+  NSURL *manifest = [root URLByAppendingPathComponent:MDLayoutName()];
+  NSArray<NSFileVersion *> *versions = [NSFileVersion unresolvedConflictVersionsOfItemAtURL:manifest];
+  if (!versions.count) return YES;
+  if (![[NSFileManager.defaultManager attributesOfItemAtPath:manifest.path error:nil][NSFileType] isEqual:NSFileTypeRegular]) return NO;
+  NSDictionary *current = MDLayoutArticles([NSData dataWithContentsOfURL:manifest]);
+  if (!current) return NO;
+  NSMutableDictionary *merged = [current mutableCopy];
+  for (NSFileVersion *version in versions) {
+    NSDictionary *alternate = version.URL ? MDLayoutArticles([NSData dataWithContentsOfURL:version.URL]) : nil;
+    if (!alternate) return NO;
+    for (NSString *note in alternate) {
+      if (merged[note] && ![merged[note] isEqual:alternate[note]]) return NO;
+      merged[note] = alternate[note];
+    }
+  }
+  if (![current isEqual:merged]) {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version":@1, @"articles":merged}
+                                                   options:NSJSONWritingSortedKeys error:nil];
+    if (!data || ![data writeToURL:manifest options:NSDataWritingAtomic error:nil]) return NO;
+  }
+  for (NSFileVersion *version in versions) version.resolved = YES;
+  return YES;
+}
+
+// NSFilePresenter delivers local and iCloud Drive changes on its serial queue.
+@interface LBWorkspacePresenter : NSObject <NSFilePresenter>
+@property (nonatomic, copy) NSURL *presentedItemURL;
+@property (nonatomic, strong) NSOperationQueue *presentedItemOperationQueue;
+@property (nonatomic) BOOL active;
+@property (nonatomic) NSUInteger generation;
+@end
+
+@implementation LBWorkspacePresenter
+- (instancetype)initWithURL:(NSURL *)url {
+  if ((self = [super init])) {
+    _presentedItemURL = url;
+    _presentedItemOperationQueue = [NSOperationQueue new];
+    _presentedItemOperationQueue.maxConcurrentOperationCount = 1;
+  }
+  return self;
+}
+- (void)presentedItemDidChange {
+  dispatch_async(dispatch_get_main_queue(), ^{
+    NSUInteger generation = ++self.generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+      if (self.active && generation == self.generation) {
+        [NSNotificationCenter.defaultCenter postNotificationName:@"LBWorkspaceFilesDidChange" object:self.presentedItemURL];
+        NSURL *root = self.presentedItemURL;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+          NSURL *manifest = [root URLByAppendingPathComponent:MDLayoutName()];
+          if (![NSFileVersion unresolvedConflictVersionsOfItemAtURL:manifest].count) return;
+          [[[NSFileCoordinator alloc] initWithFilePresenter:self] coordinateWritingItemAtURL:root options:0
+              error:nil byAccessor:^(NSURL *url){
+            if (MDReconcileLayoutVersions(url)) dispatch_async(dispatch_get_main_queue(), ^{
+              if (self.active) [NSNotificationCenter.defaultCenter postNotificationName:@"LBWorkspaceFilesDidChange" object:root];
+            });
+          }];
+        });
+      }
+    });
+  });
+}
+- (void)presentedSubitemDidChangeAtURL:(NSURL *)url {
+  NSString *name = url.lastPathComponent;
+  if ([name hasPrefix:@"."] && ![name isEqual:@".longblog-layout.json"] && ![name hasSuffix:@".icloud"]) return;
+  [self presentedItemDidChange];
+}
+- (void)presentedSubitemDidAppearAtURL:(NSURL *)url { [self presentedSubitemDidChangeAtURL:url]; }
+- (void)presentedSubitemAtURL:(NSURL *)oldURL didMoveToURL:(NSURL *)newURL { [self presentedItemDidChange]; }
+- (void)presentedSubitemAtURL:(NSURL *)url didGainVersion:(NSFileVersion *)version { [self presentedSubitemDidChangeAtURL:url]; }
+@end
+
 @implementation LBMdStore {
+  BOOL _observeWorkspace;
+  LBWorkspacePresenter *_workspacePresenter;
   NSURL *_activeFolderURL;
   BOOL _accessingSecurityScope;
   NSURL *_scopedFolderURL;
 }
 
+- (NSString *)lastPulledHead {
+  NSDictionary *state = MDLoadState(self.articlesFolderURL, LBStore.repo, nil);
+  if (!state || state[@"pending"] || state[@"singleSourcePendingReview"]) return nil;
+  return [state[@"pullHead"] isKindOfClass:NSString.class] ? state[@"pullHead"] : @"";
+}
 - (void)syncFromGitHub:(void (^)(NSError *))done { [self beginArticleOperation:@"sync" note:nil done:done]; }
 - (void)forceSyncFromGitHub:(void (^)(NSError *))done { [self beginArticleOperation:@"forceSync" note:nil done:done]; }
 - (void)publishArticle:(NSString *)noteId done:(void (^)(NSError *))done { [self beginArticleOperation:@"publish" note:noteId done:done]; }
@@ -739,7 +840,15 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
 + (instancetype)shared {
   static LBMdStore *store;
   static dispatch_once_t once;
-  dispatch_once(&once, ^{ store = [LBMdStore new]; });
+  dispatch_once(&once, ^{
+    store = [LBMdStore new];
+    store->_observeWorkspace = YES;
+    [store bindWorkspacePresenter];
+#if TARGET_OS_IOS
+    [NSNotificationCenter.defaultCenter addObserver:store selector:@selector(workspaceEnteredBackground:) name:@"UIApplicationDidEnterBackgroundNotification" object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:store selector:@selector(workspaceBecameActive:) name:@"UIApplicationDidBecomeActiveNotification" object:nil];
+#endif
+  });
   return store;
 }
 
@@ -882,9 +991,32 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
   _activeFolderURL = url.URLByStandardizingPath;
   _scopedFolderURL = url;
   _accessingSecurityScope = ok;
+  [self bindWorkspacePresenter];
 
   [NSNotificationCenter.defaultCenter postNotificationName:LBMdStoreDidChange object:self];
   return YES;
+}
+
+- (void)stopWorkspacePresenter {
+  if (_workspacePresenter) {
+    _workspacePresenter.active = NO;
+    [NSFileCoordinator removeFilePresenter:_workspacePresenter];
+    _workspacePresenter = nil;
+  }
+}
+- (void)bindWorkspacePresenter {
+  if (!_observeWorkspace) return;
+  [self stopWorkspacePresenter];
+  if (!self.isCustomFolder) return;
+  _workspacePresenter = [[LBWorkspacePresenter alloc] initWithURL:self.articlesFolderURL];
+  _workspacePresenter.active = YES;
+  [NSFileCoordinator addFilePresenter:_workspacePresenter];
+  [_workspacePresenter presentedItemDidChange];
+}
+- (void)workspaceEnteredBackground:(NSNotification *)note { [self stopWorkspacePresenter]; }
+- (void)workspaceBecameActive:(NSNotification *)note {
+  if (!_workspacePresenter) [self bindWorkspacePresenter];
+  [_workspacePresenter presentedItemDidChange];
 }
 
 - (void)resetFolderToDefault {
@@ -898,6 +1030,7 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
   [NSUserDefaults.standardUserDefaults removeObjectForKey:@"LBArticlesFolderBookmark"];
   [NSUserDefaults.standardUserDefaults removeObjectForKey:@"LBArticlesFolderName"];
   [self resolveFolder];
+  [self bindWorkspacePresenter];
   [NSNotificationCenter.defaultCenter postNotificationName:LBMdStoreDidChange object:self];
 }
 
@@ -1089,14 +1222,62 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
   [NSNotificationCenter.defaultCenter postNotificationName:LBMdStoreDidChange object:self];
   return YES;
 }
-- (NSArray<NSDictionary *> *)listArticles {
+static NSArray *MDFileStamp(NSURL *url) {
+  struct stat st;
+  if (!url || lstat(url.fileSystemRepresentation, &st) || !S_ISREG(st.st_mode)) return nil;
+  return @[@(st.st_dev), @(st.st_ino), @(st.st_size), @(st.st_mtimespec.tv_sec), @(st.st_mtimespec.tv_nsec),
+           @(st.st_ctimespec.tv_sec), @(st.st_ctimespec.tv_nsec)];
+}
+- (NSDictionary *)articleIndexAtURL:(NSURL *)indexURL {
+  if (!indexURL) return nil;
+  NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:indexURL.path error:nil];
+  if (![attrs[NSFileType] isEqual:NSFileTypeRegular] || [attrs[NSFileSize] unsignedLongLongValue] > 32*1024*1024) return nil;
+  NSDictionary *index = [NSDictionary dictionaryWithContentsOfURL:indexURL error:nil];
+  if (![index[@"version"] isEqual:@1] || ![index[@"root"] isEqual:self.articlesFolderURL.path] ||
+      ![index[@"entries"] isKindOfClass:NSDictionary.class] || ![index[@"order"] isKindOfClass:NSArray.class]) return nil;
+  return index;
+}
+- (NSArray<NSDictionary *> *)cachedArticleListAtURL:(NSURL *)indexURL {
+  NSDictionary *index = [self articleIndexAtURL:indexURL]; if (!index) return nil;
+  NSMutableArray *rows = [NSMutableArray array];
+  for (NSString *key in index[@"order"]) {
+    id entry = index[@"entries"][key];
+    NSDictionary *row = [entry isKindOfClass:NSDictionary.class] ? entry[@"row"] : nil;
+    if (![row isKindOfClass:NSDictionary.class] || ![row[@"id"] isEqual:key] || !MDID(key)) return nil;
+    [rows addObject:row];
+  }
+  return rows;
+}
+- (NSArray<NSDictionary *> *)listArticles { return [self listArticlesWithIndexAtURL:nil]; }
+- (NSArray<NSDictionary *> *)listArticlesWithIndexAtURL:(NSURL *)indexURL {
   NSURL *dir = self.articlesFolderURL;
+  NSDictionary *old = [self articleIndexAtURL:indexURL];
+  if (old && !MDLayout(dir)) return [self cachedArticleListAtURL:indexURL] ?: @[];
+  NSMutableDictionary *entries = [NSMutableDictionary dictionary];
   NSMutableArray *items = [NSMutableArray array];
   for (NSString *note in MDArticleIDs(dir)) {
     NSURL *url = MDURL(dir, [note stringByAppendingString:@".md"]);
     if (!url) continue;
     NSDictionary *attrs = [NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil];
+    if (!attrs && MDRequestPlaceholder(url)) {
+      NSDictionary *previous = old[@"entries"][note];
+      NSDictionary *row = [previous isKindOfClass:NSDictionary.class] ? previous[@"row"] : nil;
+      if ([row isKindOfClass:NSDictionary.class] && [row[@"id"] isEqual:note]) {
+        entries[note] = previous;
+        [items addObject:row];
+      }
+      continue;
+    }
     if (![attrs[NSFileType] isEqual:NSFileTypeRegular]) continue;
+    NSURL *html = MDURL(dir, [note stringByAppendingString:@".html"]);
+    BOOL has = html && [[NSFileManager.defaultManager attributesOfItemAtPath:html.path error:nil][NSFileType] isEqual:NSFileTypeRegular];
+    NSArray *stamp = indexURL ? MDFileStamp(url) : nil;
+    NSDictionary *cached = old[@"entries"][note];
+    NSDictionary *row = [cached isKindOfClass:NSDictionary.class] ? cached[@"row"] : nil;
+    if ([row isKindOfClass:NSDictionary.class] && [row[@"id"] isEqual:note] &&
+        [row[@"filePath"] isEqual:url.path] && [row[@"hasHTMLSidecar"] isEqual:@(has)] && stamp && [stamp isEqual:cached[@"stamp"]]) {
+      entries[note] = cached; [items addObject:row]; continue;
+    }
     NSString *text = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
     if (!text) continue;
     NSDictionary *parsed = [LBMdStore parseFrontmatterAndBody:text];
@@ -1111,26 +1292,35 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
     post[@"publish"] = @([parsed[@"publish"] boolValue]);
     post[@"tags"] = [parsed[@"tags"] isKindOfClass:NSArray.class] ? parsed[@"tags"] : @[];
     post[@"pinned"] = @([parsed[@"pinned"] boolValue]); post[@"filePath"] = url.path;
-    NSURL *html = MDURL(dir, [note stringByAppendingString:@".html"]);
-    BOOL has = html && [[NSFileManager.defaultManager attributesOfItemAtPath:html.path error:nil][NSFileType] isEqual:NSFileTypeRegular];
+
     post[@"hasSidecarHtml"] = @(has); post[@"hasHTMLSidecar"] = @(has); post[@"htmlPath"] = has ? html.path : @"";
     BOOL hasImg = [text containsString:@"<img"] || [text containsString:@"!["];
     post[@"hasImage"] = @(hasImg);
     [items addObject:post];
+    if (stamp) entries[note] = @{@"stamp":stamp, @"row":post};
   }
   [items sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
     return (NSComparisonResult)MDArticleOrder([a[@"publishedAt"] longLongValue], [a[@"createdAt"] longLongValue], [a[@"id"] UTF8String], [b[@"publishedAt"] longLongValue], [b[@"createdAt"] longLongValue], [b[@"id"] UTF8String]);
   }];
+  if (indexURL && entries.count == items.count && ![entries isEqual:old[@"entries"]]) {
+    NSDictionary *index = @{@"version":@1, @"entries":entries, @"order":[items valueForKey:@"id"], @"root":dir.path};
+    NSURL *parent = indexURL.URLByDeletingLastPathComponent;
+    if ([NSFileManager.defaultManager createDirectoryAtURL:parent withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:nil]
+        && LBProtectLocalURL(parent,nil) && [index writeToURL:indexURL error:nil]) LBProtectLocalURL(indexURL,nil);
+  }
   return items;
 }
 - (NSDictionary *)loadArticle:(NSString *)noteId {
   if (!MDID(noteId)) return nil;
   NSURL *dir = self.articlesFolderURL, *url = MDURL(dir, [noteId stringByAppendingString:@".md"]);
   if (!url || ![[NSFileManager.defaultManager attributesOfItemAtPath:url.path error:nil][NSFileType] isEqual:NSFileTypeRegular]) return nil;
-  NSString *raw = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil]; if (!raw) return nil;
+  NSData *source = [NSData dataWithContentsOfURL:url];
+  NSString *raw = source ? [[NSString alloc] initWithData:source encoding:NSUTF8StringEncoding] : nil;
+  if (!raw) return nil;
   NSDictionary *parsed = [LBMdStore parseFrontmatterAndBody:raw];
   if (parsed[@"id"] && ![parsed[@"id"] isEqual:noteId]) return nil;
   NSMutableDictionary *post = [parsed mutableCopy];
+  post[@"sourceRevision"] = MDDigest(source);
   [post addEntriesFromDictionary:MDDates(parsed, url)];
   post[@"id"] = noteId; post[@"slug"] = parsed[@"slug"] ?: noteId;
   post[@"title"] = parsed[@"title"] ?: @"未命名文章"; post[@"filePath"] = url.path;
@@ -1150,6 +1340,71 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
   } else if (html.length) post[@"html"] = MDCanonicalReferences(html);
   post[@"isLocalDraft"] = @(![parsed[@"publish"] boolValue]);
   return post;
+}
+
+// A verified, content-addressed copy makes repeated recovery attempts idempotent.
+static NSString *MDConflictCopy(NSURL *root, NSString *note, NSData *data) {
+  if (!data || !MDID(note)) return nil;
+  NSString *relative = [NSString stringWithFormat:@"冲突副本/%@/%@.md", note, MDDigest(data)];
+  NSURL *url = MDRawURL(root, relative);
+  if (!url || ![NSFileManager.defaultManager createDirectoryAtURL:url.URLByDeletingLastPathComponent
+      withIntermediateDirectories:YES attributes:nil error:nil]) return nil;
+  [data writeToURL:url options:NSDataWritingWithoutOverwriting error:nil];
+  return [[NSData dataWithContentsOfURL:url] isEqual:data] ? relative : nil;
+}
+
+// Coordinate the workspace because one save can rename a note package and rewrite its layout.
+- (BOOL)saveArticleWithId:(NSString *)noteId title:(NSString *)title markdown:(NSString *)markdown
+                  summary:(NSString *)summary publish:(BOOL)publish tags:(NSArray<NSString *> *)tags
+         expectedRevision:(NSString *)revision savedPost:(NSDictionary **)savedPost error:(NSError **)outError {
+  if (!MDID(noteId)) { if (outError) *outError = MDError(400, @"文章 ID 无效"); return NO; }
+  NSURL *root = self.articlesFolderURL;
+  __block NSError *failure = nil;
+  __block BOOL saved = NO;
+  __block NSDictionary *snapshot = nil;
+  NSError *coordination = nil;
+  [[[NSFileCoordinator alloc] initWithFilePresenter:nil] coordinateWritingItemAtURL:root options:0
+      error:&coordination byAccessor:^(NSURL *coordinatedRoot) {
+    if (![coordinatedRoot.URLByStandardizingPath isEqual:root.URLByStandardizingPath] ||
+        ![self.articlesFolderURL isEqual:root]) {
+      failure = MDError(409, @"文章目录已移动，请重新打开。"); return;
+    }
+    BOOL layoutReady = MDReconcileLayoutVersions(root);
+    NSURL *article = MDURL(root, [noteId stringByAppendingPathExtension:@"md"]);
+    NSData *current = article ? [NSData dataWithContentsOfURL:article] : nil;
+    NSArray<NSFileVersion *> *versions = article ? [NSFileVersion unresolvedConflictVersionsOfItemAtURL:article] : nil;
+    BOOL conflict = versions.count > 0 || !layoutReady;
+    if (versions.count && current) {
+      // Preserve *every* offline variant before acknowledging any system conflict.
+      BOOL safe = YES;
+      for (NSFileVersion *version in versions) {
+        NSData *bytes = version.URL ? [NSData dataWithContentsOfURL:version.URL] : nil;
+        if (!MDConflictCopy(root, noteId, bytes)) { safe = NO; break; }
+      }
+      if (safe) for (NSFileVersion *version in versions) version.resolved = YES;
+    }
+    if (!current && article && MDRequestPlaceholder(article)) {
+      failure = MDError(409, @"iCloud 正在下载这篇文章，请保留当前编辑，下载完成后再保存。"); return;
+    }
+    if (!article || conflict || ![MDDigest(current) isEqual:revision]) {
+      // Keep the authored version outside the layout manifest, including during a layout conflict.
+      NSDictionary *fields = @{@"id":noteId, @"title":title ?: @"", @"summary":summary ?: @"",
+                               @"tags":tags ?: @[], @"publish":@NO};
+      NSData *copy = [[LBMdStore serializeFrontmatter:fields body:markdown ?: @""] dataUsingEncoding:NSUTF8StringEncoding];
+      NSString *relative = MDConflictCopy(root, noteId, copy);
+      failure = MDError(409, relative ? [NSString stringWithFormat:@"文章有其他版本。已保留原文，你的编辑已另存到 %@。", relative] :
+          @"文章有其他版本，暂时无法另存。请复制当前编辑内容后重新打开文章。");
+      if (relative && !layoutReady) failure = MDError(409, [NSString stringWithFormat:@"iCloud 中的文章目录有冲突，请在两端核对同一文章的目录。你的编辑已保存在 %@。", relative]);
+      return;
+    }
+    NSError *writeError = nil;
+    saved = [self saveArticleWithId:noteId title:title markdown:markdown summary:summary publish:publish tags:tags error:&writeError];
+    if (saved) snapshot = [self loadArticle:noteId];
+    failure = writeError;
+  }];
+  if (savedPost) *savedPost = snapshot;
+  if (!saved && outError) *outError = failure ?: coordination ?: MDError(409, @"暂时无法协调文章目录。");
+  return saved;
 }
 
 - (BOOL)saveArticleWithId:(NSString *)noteId
@@ -1303,8 +1558,7 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
     BOOL localPub = [p[@"publish"] boolValue];
     NSString *localMD = [noteId stringByAppendingString:@".md"];
     NSDictionary *rec = files[localMD];
-    NSData *localData = MDRead(self.articlesFolderURL, localMD);
-    NSString *localHash = MDDigest(localData);
+
 
     if (rec) {
       if (!localPub) {
@@ -1319,6 +1573,9 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
       } else {
         // Legacy records lack a semantic baseline: treat any changed bytes as
         // staged rather than guessing that all non-body changes are timestamps.
+        NSData *localData = MDRead(self.articlesFolderURL, localMD);
+        NSString *localHash = MDDigest(localData);
+        if ([localHash isEqual:rec[@"baseline"]]) continue;
         BOOL contentChanged = rec[@"contentBaseline"] ? ![MDContentDigest(localData) isEqualToString:rec[@"contentBaseline"]]
                                                       : ![localHash isEqualToString:rec[@"baseline"]];
         if (contentChanged) {
@@ -1846,6 +2103,7 @@ static BOOL MDRevertJournalClear(NSURL *root, NSError **error) {
     }
   }
   self.state[@"files"] = self.records; self.state[@"head"] = self.snapshot[@"head"];
+  self.state[@"pullHead"] = self.snapshot[@"head"];
   if (!MDSaveState(self.root, self.state, &e)) return [self finish:e];
   if (!MDArchiveAll(self.root, &e)) return [self finish:e];
   [self finish:nil];

@@ -179,13 +179,12 @@ function headings(content) {
   }
 }
 
-let generation=0;
+let generation=0, visibleRoot=null;
 async function render(payload) {
   const doc=root.document, content=doc.getElementById('content'), status=doc.getElementById('reader-status');
   const ticket=++generation;
   try {
     if (!payload || typeof payload.body !== 'string' || payload.body.length > MAX_BODY) throw Error('文章超过 4 MiB 预览上限，正文未被截断；请在编辑器中查看。');
-    status.hidden=false;status.textContent='';
     doc.body.classList.toggle('compact', payload.compact === true);
     const theme = payload.theme === 'paper' || payload.theme === 'dark' ? payload.theme : 'auto';
     doc.documentElement.setAttribute('data-theme', theme);
@@ -194,6 +193,10 @@ async function render(payload) {
     const html=payload.bodyFormat === 'html' ? payload.body : markdownHTML(payload.body);
     const clean=sanitize(html,doc,payload);
     content.replaceChildren(clean);
+    if (visibleRoot !== payload.resourceBase) {
+      visibleRoot = payload.resourceBase;
+      if (doc.scrollingElement) doc.scrollingElement.scrollTop = 0;
+    }
     headings(content);
     renderMath(content,doc);
     status.hidden=Boolean(payload.body.trim());

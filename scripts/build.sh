@@ -36,7 +36,7 @@ for ARCH in arm64 x86_64; do
     -sdk "$SDK" -target "$ARCH-apple-macos$MIN_MACOS" \
     -import-objc-header "$BRIDGE" -I "$ROOT/Sources/LongBlog/Core" \
     "${SOURCES[@]}" "${OBJECTS[@]}" \
-    -framework SwiftUI -framework AppKit -framework Foundation -framework Security \
+    -framework AVKit -framework AVFoundation -framework Quartz -framework SwiftUI -framework AppKit -framework Foundation -framework Security -framework LocalAuthentication \
     -framework WebKit -framework UniformTypeIdentifiers -framework UserNotifications \
     -o "$BUILD/obj/$ARCH/longBlog"
 done
@@ -55,7 +55,7 @@ if [[ -f Resources/AppIcon1024.png ]]; then
   done
   iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 fi
-codesign --force --sign - --timestamp=none "$APP"
+codesign --force --sign "${CODE_SIGN_IDENTITY:--}" --timestamp=none "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 python3 scripts/check_bundle.py "$APP"
 if [[ -f tests/CoreFixtures.m ]]; then
@@ -64,7 +64,7 @@ if [[ -f tests/CoreFixtures.m ]]; then
   for OBJECT in "$BUILD/obj/$NATIVE_ARCH/"*.o; do FIXTURE_OBJECTS+=("$OBJECT"); done
   xcrun clang -arch "$NATIVE_ARCH" -isysroot "$SDK" -mmacosx-version-min="$MIN_MACOS" \
     -fobjc-arc -fmodules -I Sources/LongBlog/Core tests/CoreFixtures.m "${FIXTURE_OBJECTS[@]}" \
-    -framework AppKit -framework Foundation -framework Security -framework UserNotifications -framework UniformTypeIdentifiers \
+    -framework AppKit -framework Foundation -framework Security -framework LocalAuthentication -framework UserNotifications -framework UniformTypeIdentifiers \
     -o "$BUILD/CoreFixtures"
   "$BUILD/CoreFixtures"
 fi

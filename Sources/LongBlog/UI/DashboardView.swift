@@ -17,8 +17,8 @@ struct DashboardView: View {
     }
 
     private var postsValue: String {
+        if posts.loaded { return String(posts.articles.count) }
         if let n = model.data["postsCount"] as? NSNumber { return n.stringValue }
-        if posts.loaded { return "\(posts.articles.count)" }
         return "—"
     }
 
@@ -40,8 +40,8 @@ struct DashboardView: View {
 
     private var friendsNote: String {
         if model.data["friendsCount"] is NSNumber { return "从 GitHub .env 读取" }
-        let ghConfigured = (model.data["githubConfigured"] as? NSNumber)?.boolValue ?? false
-        return ghConfigured ? "尚未读取 .env" : "需 GitHub 令牌"
+        guard let configured = model.data["githubConfigured"] as? Bool else { return "正在读取站点配置" }
+        return configured ? "正在读取 .env" : "请在连接设置保存 GitHub 令牌"
     }
 
     var body: some View {

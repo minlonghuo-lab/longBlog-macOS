@@ -73,7 +73,7 @@ final class MenuBarController: NSObject {
             popover.performClose(sender)
         } else {
             if AppModel.shared.dashboard.data.isEmpty && !AppModel.shared.dashboard.busy {
-                AppModel.shared.dashboard.refresh()
+                AppModel.shared.dashboard.openLocal()
             }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
@@ -255,7 +255,7 @@ struct MenuBarPanelView: View {
             .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Color.blogStroke))
 
             // Primary actions
-            HStack(spacing: 8) {
+            BlogGlassGroup(spacing: 8) {
                 Button {
                     openWorkspace()
                 } label: {
@@ -283,6 +283,17 @@ struct MenuBarPanelView: View {
         .padding(16)
         .frame(width: 364)
         .foregroundStyle(Color.blogText)
-        .background(Color.blogBackground)
+        .modifier(MenuBarBackdropModifier())
+    }
+}
+
+private struct MenuBarBackdropModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+        } else {
+            content
+                .background(Color.blogBackground)
+        }
     }
 }
