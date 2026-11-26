@@ -26,6 +26,7 @@ struct InboxWorkspace: View {
                     }
                 }
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.blogBackground)
                 .overlay(alignment: .bottom) { OperationStatus(model: model).padding(.bottom, 16) }
             }
         }
@@ -129,6 +130,39 @@ struct InboxWorkspace: View {
         }
         .buttonStyle(CardButtonStyle(selected: selected, highlighted: unread))
         .accessibilityLabel("会话 访客 \(titleText)")
+        .accessibilityValue(unread ? "未读" : "")
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+        .contextMenu {
+            if unread && !model.archived {
+                Button("标为已读") { model.markRead(row) }
+            }
+            Button("查看联系信息") {
+                if model.selected?.id == row.id {
+                    model.fetchContact()
+                } else {
+                    model.select(row)
+                    model.whenIdle { model.fetchContact() }
+                }
+            }
+            if let lastText = last["text"] as? String, !lastText.isEmpty {
+                Button("拷贝最新留言") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(lastText, forType: .string)
+                    model.flash("copy", "已复制最新留言")
+                }
+            }
+            Button("拷贝会话 ID") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(row.id, forType: .string)
+                model.flash("copy", "已复制会话 ID")
+            }
+            if model.archived {
+                Divider()
+                Button("删除归档…", role: .destructive) {
+                    model.deleteArchive(row)
+                }
+            }
+        }
     }
 
     private func conversation(_ selected: DataRow) -> some View {
@@ -237,7 +271,7 @@ struct InboxWorkspace: View {
                 }
                 .onChange(of: model.messages.count) {
                     if let last = model.messages.last {
-                        withAnimation(.easeOut(duration: 0.18)) {
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
@@ -326,6 +360,14 @@ private struct MessageBubble: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(isVisitor ? Color.blogStroke : Color.clear)
                 )
+                .contextMenu {
+                    if !message.text("text").isEmpty {
+                        Button("拷贝消息内容") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(message.text("text"), forType: .string)
+                        }
+                    }
+                }
 
                 HStack(spacing: 6) {
                     Text(isVisitor ? "访客" : "站长")

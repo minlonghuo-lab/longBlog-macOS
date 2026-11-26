@@ -5,6 +5,8 @@ import AppKit
 struct LongBlogApp: App {
     @NSApplicationDelegateAdaptor(LongBlogAppDelegate.self) private var delegate
     @AppStorage(AppAppearance.storageKey) private var appearance = AppAppearance.dark.rawValue
+    @ObservedObject private var app = AppModel.shared
+    @ObservedObject private var posts = AppModel.shared.posts
 
     // The workspace window is owned by the AppDelegate (exactly one, never restored twice).
     // SwiftUI contributes the menu bar only.
@@ -12,21 +14,37 @@ struct LongBlogApp: App {
         Settings { EmptyView() }
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button("连接设置…") { post("settings") }.keyboardShortcut(",")
+                Button("连接设置…") { post("settings") }
+                    .keyboardShortcut(",")
+                    .disabled(app.connectionLocked)
             }
             CommandGroup(replacing: .newItem) {
-                Button("新建文章") { post("newArticle") }.keyboardShortcut("n")
-                Button("写说说") { post("newMemo") }.keyboardShortcut("n", modifiers: [.command, .shift])
-                Divider()
-                Button("快捷键帮助…") { post("shortcutsHelp") }.keyboardShortcut("/", modifiers: .command)
+                Button("新建文章") { post("newArticle") }
+                    .keyboardShortcut("n")
+                    .disabled(posts.busy)
+                Button("写说说") { post("newMemo") }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(app.memos.busy)
             }
             CommandGroup(after: .saveItem) {
-                Button("保存") { post("save") }.keyboardShortcut("s")
-                Button("审阅待提交文章…") { post("review") }.keyboardShortcut("p", modifiers: [.command, .shift])
+                Button("保存") { post("save") }
+                    .keyboardShortcut("s")
+                    .disabled(!app.canSaveCurrentSection)
+                Button("审阅待提交文章…") { post("review") }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .disabled(posts.staged.isEmpty || posts.busy)
+                Button("同步 GitHub 文章…") { post("syncArticles") }
+                    .disabled(posts.busy)
             }
             CommandGroup(after: .textEditing) {
-                Button("切换阅读 / 编辑") { post("editArticle") }.keyboardShortcut("e")
-                Button("搜索") { post("search") }.keyboardShortcut("f")
+                Button("切换阅读 / 编辑") { post("editArticle") }
+                    .keyboardShortcut("e")
+                    .disabled(posts.draft.id.isEmpty || posts.busy)
+                Button("AI 写作辅助…") { post("aiAssistant") }
+                    .keyboardShortcut("a", modifiers: [.command, .shift])
+                    .disabled(posts.draft.id.isEmpty || posts.draft.bodyFormat == "html" || posts.busy)
+                Button("搜索…") { post("search") }
+                    .keyboardShortcut("f")
             }
             CommandMenu("格式") {
                 ForEach(MarkdownAction.allCases) { action in
@@ -36,14 +54,16 @@ struct LongBlogApp: App {
                             editor.apply(action)
                         }
                     }
+                    .disabled(!app.isMarkdownEditingAvailable)
                     if let s = action.shortcut { button.keyboardShortcut(s.key, modifiers: s.modifiers) } else { button }
                     if [.image, .heading3, .taskList, .rule].contains(action) { Divider() }
                 }
             }
             CommandGroup(before: .toolbar) {
-                Button("快捷键帮助…") { post("shortcutsHelp") }
-                Button("铺满屏幕 / 还原窗口尺寸") { post("toggleWindowZoom") }.keyboardShortcut("z", modifiers: [.command, .control])
-                Button("显示 / 隐藏侧边栏") { post("toggleSidebar") }.keyboardShortcut("\\", modifiers: .command)
+                Button("铺满屏幕 / 还原窗口尺寸") { post("toggleWindowZoom") }
+                    .keyboardShortcut("z", modifiers: [.command, .control])
+                Button("显示 / 隐藏侧边栏") { post("toggleSidebar") }
+                    .keyboardShortcut("\\", modifiers: .command)
                 Divider()
                 Button("仪表盘") { post("nav.dashboard") }.keyboardShortcut("1")
                 Button("留言") { post("nav.inbox") }.keyboardShortcut("2")
@@ -51,9 +71,29 @@ struct LongBlogApp: App {
                 Button("说说") { post("nav.memos") }.keyboardShortcut("4")
                 Button("站点配置") { post("nav.configuration") }.keyboardShortcut("5")
                 Divider()
-                Button("阅读文章") { post("layout.read") }.keyboardShortcut("r", modifiers: [.command, .option])
-                Button("仅编辑") { post("layout.edit") }.keyboardShortcut("e", modifiers: [.command, .option])
-                Button("编辑 + 实时预览") { post("layout.split") }.keyboardShortcut("p", modifiers: [.command, .option])
+                Button("上一项") { post("nav.prev") }
+                    .keyboardShortcut("[", modifiers: .command)
+                    .disabled(!app.canStepSelection)
+                Button("下一项") { post("nav.next") }
+                    .keyboardShortcut("]", modifiers: .command)
+                    .disabled(!app.canStepSelection)
+                Divider()
+                Button("阅读文章") { post("layout.read") }
+                    .keyboardShortcut("r", modifiers: [.command, .option])
+                    .disabled(posts.draft.id.isEmpty)
+                Button("仅编辑") { post("layout.edit") }
+                    .keyboardShortcut("e", modifiers: [.command, .option])
+                    .disabled(posts.draft.id.isEmpty)
+                Button("编辑 + 实时预览") { post("layout.split") }
+                    .keyboardShortcut("p", modifiers: [.command, .option])
+                    .disabled(posts.draft.id.isEmpty)
+                Divider()
+                Button("放大编辑器字号") { post("editor.zoomIn") }
+                    .keyboardShortcut("+", modifiers: .command)
+                Button("缩小编辑器字号") { post("editor.zoomOut") }
+                    .keyboardShortcut("-", modifiers: .command)
+                Button("默认编辑器字号") { post("editor.zoomReset") }
+                    .keyboardShortcut("0", modifiers: [.command, .option])
                 Divider()
                 Picker("外观", selection: Binding(get: { appearance }, set: { appearance = $0; AppAppearance.apply(AppAppearance(rawValue: $0)) })) {
                     ForEach(AppAppearance.allCases) { Text($0.title).tag($0.rawValue) }
@@ -64,6 +104,12 @@ struct LongBlogApp: App {
             CommandGroup(before: .windowList) {
                 Button("longBlog 主窗口") { (NSApp.delegate as? LongBlogAppDelegate)?.showWorkspace() }.keyboardShortcut("0")
                 Divider()
+            }
+            CommandGroup(replacing: .help) {
+                Button("快捷键指南") { post("shortcutsHelp") }
+                    .keyboardShortcut("/", modifiers: .command)
+                Divider()
+                Button("在浏览器中打开博客站点") { post("openSite") }
             }
         }
     }
@@ -343,15 +389,40 @@ final class LongBlogAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
            let data = try? JSONSerialization.data(withJSONObject: diagnostics, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: destination)
         }
-        guard let view = NSApp.windows.first(where: {
+        guard let window = NSApp.windows.first(where: {
             $0.isVisible && ($0.contentView?.bounds.width ?? 0) >= 400 && ($0.contentView?.bounds.height ?? 0) >= 300
-        })?.contentView,
+        }), let view = window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             fputs("Smoke test failed: no laid-out application window.\n", stderr)
             exit(1)
         }
         view.cacheDisplay(in: view.bounds, to: rep)
-        if let destination = screenshot, let png = rep.representation(using: .png, properties: [:]) {
+        let outRep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: rep.pixelsWide,
+            pixelsHigh: rep.pixelsHigh,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: rep.colorSpaceName,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) ?? rep
+        outRep.size = view.bounds.size
+        if outRep !== rep, let ctx = NSGraphicsContext(bitmapImageRep: outRep) {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = ctx
+            window.effectiveAppearance.performAsCurrentDrawingAppearance {
+                NSColor.lbBackground.setFill()
+                NSBezierPath.fill(NSRect(origin: .zero, size: view.bounds.size))
+            }
+            let captured = NSImage(size: view.bounds.size)
+            captured.addRepresentation(rep)
+            captured.draw(in: NSRect(origin: .zero, size: view.bounds.size), from: .zero, operation: .sourceOver, fraction: 1.0)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        if let destination = screenshot, let png = outRep.representation(using: .png, properties: [:]) {
             do { try png.write(to: destination) }
             catch { fputs("Smoke screenshot write failed.\n", stderr); exit(1) }
         }

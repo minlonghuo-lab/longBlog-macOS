@@ -441,12 +441,13 @@ struct BlogSegmentedControl<Value: Hashable>: View {
     @State private var dragGrabOffset: CGFloat = 0
     @State private var dragPointerX: CGFloat? = nil
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var orderedFrames: [(value: Value, rect: CGRect)] {
         options.compactMap { opt in
             guard let r = frames[opt.value], r.width > 0 else { return nil }
             return (opt.value, r)
-        }
+        }.sorted { $0.rect.midX < $1.rect.midX }
     }
 
     private func valueAt(x: CGFloat) -> Value? {
@@ -536,7 +537,7 @@ struct BlogSegmentedControl<Value: Hashable>: View {
                     }
                 )
                 .onHover { inside in
-                    withAnimation(.easeOut(duration: 0.12)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) {
                         if inside {
                             hoveredValue = option.value
                         } else if hoveredValue == option.value {
@@ -544,10 +545,13 @@ struct BlogSegmentedControl<Value: Hashable>: View {
                         }
                     }
                 }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(option.label)
+                .accessibilityValue(option.count.map { "\($0) 项" } ?? "")
                 .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : [.isButton])
                 .accessibilityAction {
                     guard isEnabled, selection != option.value else { return }
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.26, dampingFraction: 0.84)) {
                         selection = option.value
                     }
                 }
@@ -569,16 +573,18 @@ struct BlogSegmentedControl<Value: Hashable>: View {
                         radius: isPressing ? 3.5 : 2,
                         y: isPressing ? 1.5 : 1
                     )
-                    .scaleEffect(isPressing ? 1.025 : 1.0)
+                    .scaleEffect(isPressing && !reduceMotion ? 1.025 : 1.0)
                     .frame(width: pill.width, height: pill.height)
                     .offset(x: pill.minX, y: pill.minY)
                     .animation(
-                        isDragging
-                            ? .interactiveSpring(response: 0.14, dampingFraction: 0.88)
-                            : .spring(response: 0.26, dampingFraction: 0.84),
+                        reduceMotion ? nil : (
+                            isDragging
+                                ? .interactiveSpring(response: 0.14, dampingFraction: 0.88)
+                                : .spring(response: 0.26, dampingFraction: 0.84)
+                        ),
                         value: pill
                     )
-                    .animation(.easeOut(duration: 0.12), value: isPressing)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isPressing)
                     .allowsHitTesting(false)
             }
         }
@@ -616,7 +622,7 @@ struct BlogSegmentedControl<Value: Hashable>: View {
                     }
                     let finalX = isDragging ? (value.location.x - dragGrabOffset) : value.location.x
                     let target = valueAt(x: finalX) ?? dragStartValue ?? selection
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.84)) {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.26, dampingFraction: 0.84)) {
                         isPressing = false
                         isDragging = false
                         dragGrabOffset = 0
@@ -638,6 +644,19 @@ struct BlogSegmentedControl<Value: Hashable>: View {
         )
         .pointingHandCursor(isEnabled)
         .fixedSize()
+        .focusable()
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { key in
+            let segments = orderedFrames
+            guard isEnabled, key.modifiers.isEmpty,
+                  let current = segments.firstIndex(where: { $0.value == selection }) else { return .ignored }
+            let next = current + (key.key == .rightArrow ? 1 : -1)
+            if segments.indices.contains(next) {
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) {
+                    selection = segments[next].value
+                }
+            }
+            return .handled
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
     }
@@ -714,6 +733,7 @@ struct CardButtonStyle: ButtonStyle {
         let configuration: ButtonStyle.Configuration
         let selected: Bool
         let highlighted: Bool
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
         @State private var hovering = false
         var body: some View {
             let fill: Color = selected
@@ -725,11 +745,11 @@ struct CardButtonStyle: ButtonStyle {
             configuration.label
                 .background(fill, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(stroke))
-                .scaleEffect(configuration.isPressed ? 0.992 : 1)
+                .scaleEffect(configuration.isPressed && !reduceMotion ? 0.992 : 1)
                 .onHover { hovering = $0 }
                 .pointingHandCursor()
-                .animation(.easeOut(duration: 0.12), value: hovering)
-                .animation(.easeOut(duration: 0.12), value: selected)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: selected)
         }
     }
 }
@@ -824,6 +844,7 @@ struct EmptyWorkspace: View {
 /// Floating, non-layout-shifting status. Errors stay until dismissed; successes fade (see ServiceModel).
 struct OperationStatus: View {
     @ObservedObject var model: ServiceModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             ForEach(model.errors.keys.sorted(), id: \.self) { key in
@@ -852,6 +873,7 @@ struct OperationStatus: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 4)
                 }
+                .accessibilityElement(children: .combine)
                 .toastBackground(.blogGreen)
             }
             if model.busy {
@@ -861,13 +883,14 @@ struct OperationStatus: View {
                         .font(.system(size: 12))
                         .foregroundStyle(Color.blogSecondary)
                 }
+                .accessibilityElement(children: .combine)
                 .toastBackground(.blogPeach)
             }
         }
         .frame(maxWidth: 540)
         .padding(.horizontal, 14)
         .padding(.vertical, model.busy || !model.errors.isEmpty || !model.successes.isEmpty ? 10 : 0)
-        .animation(.spring(response: 0.26, dampingFraction: 0.84), value: model.successes.count + model.errors.count + model.running.count)
+        .animation(reduceMotion ? nil : .spring(response: 0.26, dampingFraction: 0.84), value: model.successes.count + model.errors.count + model.running.count)
     }
 }
 

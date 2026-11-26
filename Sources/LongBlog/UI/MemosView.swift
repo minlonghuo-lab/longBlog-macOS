@@ -31,6 +31,7 @@ struct MemosWorkspace: View {
                     }
                 }
                 .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.blogBackground)
                 .overlay(alignment: .bottom) { OperationStatus(model: model).padding(.bottom, 16) }
             }
         }
@@ -114,7 +115,7 @@ struct MemosWorkspace: View {
                         Text(model.cacheRunning
                              ? "正在本地缓存附件 \(model.cacheCompleted)/\(model.cacheTotal)…"
                              : "本地附件 \(model.cacheCompleted)/\(model.cacheTotal)")
-                            .font(.system(size: 10.5).monospacedDigit())
+                            .font(.system(size: 11).monospacedDigit())
                             .foregroundStyle(Color.blogMuted)
                             .lineLimit(1)
                     }
@@ -197,14 +198,30 @@ struct MemosWorkspace: View {
         }
         .buttonStyle(CardButtonStyle(selected: selected))
         .accessibilityLabel("说说：\(String(row.text("content").prefix(60)))")
+        .accessibilityValue([row.flag("pinned") ? "置顶" : nil, visibilityName(vis), selected && model.isDirty ? "未保存" : nil].compactMap { $0 }.joined(separator: "，"))
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
         .contextMenu {
+            Button("编辑说说") { model.select(row) }
+            if !row.text("content").isEmpty {
+                Button("拷贝正文") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(row.text("content"), forType: .string)
+                    model.flash("copy", "已复制说说正文")
+                }
+            }
+            Divider()
             if model.archived {
-                Button("恢复说说") { model.update(["rowStatus": "NORMAL"], title: "恢复说说", target: row.data) }
+                Button("恢复说说…") { model.update(["rowStatus": "NORMAL"], title: "恢复说说", target: row.data) }
+                Divider()
                 Button("永久删除…", role: .destructive) {
                     model.deleteArchived(row.data)
                 }
             } else {
-                Button("归档") {
+                let pinned = row.flag("pinned")
+                Button(pinned ? "取消置顶…" : "置顶说说…") {
+                    model.update(["pinned": !pinned], title: pinned ? "取消置顶" : "置顶说说", target: row.data)
+                }
+                Button("归档说说…") {
                     model.update(["rowStatus": "ARCHIVED"], title: "归档说说", target: row.data)
                 }
             }
@@ -485,7 +502,7 @@ private struct MemoAttachmentCard: View {
                                     .foregroundStyle(Color.blogGreen.opacity(0.85))
                             }
                         }
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(Color.blogMuted)
                     }
                     .padding(.horizontal, 9)
@@ -543,6 +560,7 @@ private struct MemoAttachmentCard: View {
 // MARK: - Memo Editor
 
 private struct MemoEditorView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: MemosModel
     @State private var preview = false
     @State private var importing = false
@@ -628,7 +646,7 @@ private struct MemoEditorView: View {
                     .transition(.opacity)
                 }
             }
-            .animation(.smooth(duration: 0.18), value: preview)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: preview)
 
             if !model.resources.isEmpty {
                 attachmentsGallery
@@ -685,20 +703,20 @@ private struct MemoEditorView: View {
                     .disabled(isArchived || model.busy || (!model.isDirty && model.original != nil))
 
                     if model.original != nil {
-                        Button(isPinned ? "取消置顶" : "置顶") {
+                        Button(isPinned ? "取消置顶…" : "置顶…") {
                             model.update(["pinned": !isPinned], title: isPinned ? "取消置顶" : "置顶说说")
                         }
                         .buttonStyle(BlogSecondaryButtonStyle())
                         .disabled(model.busy)
 
-                        Button(isArchived ? "恢复说说" : "归档") {
+                        Button(isArchived ? "恢复说说…" : "归档…") {
                             model.update(["rowStatus": isArchived ? "NORMAL" : "ARCHIVED"], title: isArchived ? "恢复说说" : "归档说说")
                         }
                         .buttonStyle(BlogSecondaryButtonStyle())
                         .disabled(model.busy)
 
                         if isArchived {
-                            Button("永久删除") {
+                            Button("永久删除…") {
                                 model.deleteArchived()
                             }
                             .buttonStyle(BlogSecondaryButtonStyle(destructive: true))
@@ -710,7 +728,7 @@ private struct MemoEditorView: View {
                 Spacer()
 
                 if model.isDirty {
-                    Button("放弃修改") {
+                    Button("放弃修改…") {
                         model.discardThen { model.assign(model.original) }
                     }
                     .buttonStyle(BlogSecondaryButtonStyle())
@@ -827,7 +845,9 @@ private struct MemoAttachmentPreview: View {
                             Image(systemName: "chevron.left")
                         }
                         .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                        .help("上一项")
+                        .keyboardShortcut(.leftArrow, modifiers: [])
+                        .accessibilityLabel("上一项附件")
+                        .help("上一项  ←")
 
                         Button {
                             step(1)
@@ -835,7 +855,9 @@ private struct MemoAttachmentPreview: View {
                             Image(systemName: "chevron.right")
                         }
                         .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                        .help("下一项")
+                        .keyboardShortcut(.rightArrow, modifiers: [])
+                        .accessibilityLabel("下一项附件")
+                        .help("下一项  →")
                     }
 
                     if kind == .image {
@@ -845,13 +867,17 @@ private struct MemoAttachmentPreview: View {
                             Image(systemName: "minus.magnifyingglass")
                         }
                         .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                        .help("缩小")
+                        .keyboardShortcut("-", modifiers: .command)
+                        .accessibilityLabel("缩小图片")
+                        .help("缩小  ⌘-")
 
                         Button("\(Int(zoom * 100))%") {
                             zoom = 1.0
                         }
                         .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                        .help("重置缩放")
+                        .keyboardShortcut("0", modifiers: .command)
+                        .accessibilityLabel("重置缩放比例")
+                        .help("重置缩放  ⌘0")
 
                         Button {
                             zoom = min(3.0, zoom + 0.25)
@@ -859,7 +885,9 @@ private struct MemoAttachmentPreview: View {
                             Image(systemName: "plus.magnifyingglass")
                         }
                         .buttonStyle(BlogSecondaryButtonStyle(compact: true))
-                        .help("放大")
+                        .keyboardShortcut("+", modifiers: .command)
+                        .accessibilityLabel("放大图片")
+                        .help("放大  ⌘+")
                     }
 
                     Button {

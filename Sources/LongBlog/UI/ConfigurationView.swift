@@ -16,6 +16,7 @@ struct StagingReviewView: View {
                 Spacer()
                 Button("关闭") { dismiss() }
                     .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                    .keyboardShortcut(.cancelAction)
                     .disabled(model.busy)
             }
 
@@ -44,6 +45,7 @@ struct StagingReviewView: View {
                                     .textSelection(.enabled)
                             }
                         }
+                        .accessibilityElement(children: .combine)
                     }
                 }
             }
@@ -77,6 +79,7 @@ struct StagingReviewView: View {
                     .foregroundStyle(Color.blogMuted)
                 Button("提交到 main…") { model.commit() }
                     .buttonStyle(BlogPrimaryButtonStyle())
+                    .keyboardShortcut(.defaultAction)
                     .disabled(model.busy || model.frozenReview.isEmpty)
             }
         }
@@ -167,6 +170,9 @@ struct ConfigurationWorkspace: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(CardButtonStyle(selected: selected, highlighted: dirtyCount > 0))
+                    .accessibilityLabel(section.text("title"))
+                    .accessibilityValue(dirtyCount > 0 ? "\(sectionCountSubtitle(section))，已修改 \(dirtyCount) 项" : sectionCountSubtitle(section))
+                    .accessibilityAddTraits(selected ? [.isSelected] : [])
                 }
             }
             .padding(14)
@@ -318,6 +324,7 @@ struct ConfigurationWorkspace: View {
                 Spacer()
                 Button("返回编辑") { model.showingPreview = false }
                     .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                    .keyboardShortcut(.cancelAction)
                     .disabled(model.busy)
             }
 
@@ -366,6 +373,7 @@ struct ConfigurationWorkspace: View {
                 Spacer()
                 Button("提交到 main…") { model.commit() }
                     .buttonStyle(BlogPrimaryButtonStyle())
+                    .keyboardShortcut(.defaultAction)
                     .disabled(model.busy || model.sha.isEmpty)
             }
         }
@@ -412,8 +420,8 @@ private struct ConfigField: View {
                 }
                 Spacer()
                 Text(key)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundStyle(Color.blogMuted.opacity(0.65))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Color.blogMuted.opacity(0.78))
                 if dirty {
                     Button {
                         model.resetKey(key)
@@ -442,6 +450,7 @@ private struct ConfigField: View {
                     )
                     .toggleStyle(.switch)
                     .controlSize(.small)
+                    .accessibilityLabel(field.text("label"))
                     Spacer()
                 }
                 .padding(.horizontal, 13)
@@ -474,6 +483,22 @@ private struct ConfigField: View {
                 Text(field.text("help"))
                     .font(.system(size: 11.5))
                     .foregroundStyle(Color.blogMuted.opacity(0.85))
+            }
+        }
+        .contextMenu {
+            Button("拷贝配置键名") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(key, forType: .string)
+            }
+            if !value.wrappedValue.isEmpty {
+                Button("拷贝当前值") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(value.wrappedValue, forType: .string)
+                }
+            }
+            if dirty {
+                Divider()
+                Button("还原为基准值") { model.resetKey(key) }
             }
         }
     }

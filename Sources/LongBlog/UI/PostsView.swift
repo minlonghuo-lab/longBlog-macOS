@@ -51,7 +51,7 @@ struct PostsWorkspace: View {
                 .foregroundStyle(Color.blogSecondary)
             Spacer()
             BlogGlassGroup(spacing: 8) {
-                Button("撤销") {
+                Button("撤销…") {
                     model.frozenReview = model.staged
                     model.revert()
                 }
@@ -62,7 +62,7 @@ struct PostsWorkspace: View {
                     model.review()
                 } label: {
                     HStack(spacing: 5) {
-                        Text("审阅并提交")
+                        Text("审阅并提交…")
                         ShortcutCap(text: "⌘⇧P", onPrimary: true)
                     }
                 }
@@ -78,6 +78,7 @@ struct PostsWorkspace: View {
 }
 
 private struct PostListColumn: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: PostsModel
     var compact = false
     @ObservedObject private var app = AppModel.shared
@@ -137,7 +138,7 @@ private struct PostListColumn: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .animation(.smooth(duration: 0.18), value: model.filter)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: model.filter)
 
             HairlineDivider()
 
@@ -177,7 +178,14 @@ private struct PostListColumn: View {
     }
 
     @ViewBuilder private func contextMenu(_ row: DataRow) -> some View {
+        let titleText = row.text("title").isEmpty ? "未命名文章" : row.text("title")
+        let isStaged = model.stagedIDs.contains(row.id)
         Button("阅读文章") { model.select(row, keepStudioMode: false) }
+        Button("编辑文章") {
+            model.splitPreview = false
+            model.select(row, keepStudioMode: true)
+            if row.id == model.draft.id { model.editing = true }
+        }
         Button("在分栏工作台中编辑") {
             model.splitPreview = true
             model.select(row, keepStudioMode: true)
@@ -185,17 +193,32 @@ private struct PostListColumn: View {
         }
         Divider()
         if row.flag("publish") {
-            Button("删除文章（需先下架）") {}
-                .disabled(true)
-            Button("暂存下架") { model.delete(row) }
+            Button("暂存下架…") { model.delete(row) }
         } else {
-            Button("删除草稿…", role: .destructive) { model.delete(row) }
+            Button("暂存发布") {
+                if row.id == model.draft.id {
+                    model.stage(true)
+                } else {
+                    model.run("stage", "posts.stage", ["id": row.id, "publish": true], success: "已暂存发布；请审阅后批量提交。") { _ in
+                        model.refresh()
+                    }
+                }
+            }
+        }
+        Divider()
+        Button("拷贝文章标题") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(titleText, forType: .string)
         }
         if let path = row.data["filePath"] as? String, !path.isEmpty {
             Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
             Button("拷贝文件路径") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(path, forType: .string) }
         }
         Button("拷贝文章 ID") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(row.id, forType: .string) }
+        if !row.flag("publish") && !isStaged {
+            Divider()
+            Button("删除草稿…", role: .destructive) { model.delete(row) }
+        }
     }
 }
 
@@ -260,7 +283,9 @@ private struct PostListCell: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(CardButtonStyle(selected: selected))
-        .accessibilityLabel("文章：\(row.text("title"))")
+        .accessibilityLabel("文章：\(row.text("title").isEmpty ? "未命名文章" : row.text("title"))")
+        .accessibilityValue([row.flag("publish") ? "已发布" : "草稿", staged ? "待提交" : nil, dirty ? "未保存" : nil].compactMap { $0 }.joined(separator: "，"))
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
     private var dateLine: String {
@@ -308,6 +333,7 @@ private final class EditorSession: ObservableObject {
 }
 
 private struct PostDetailView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: PostsModel
     @Binding var collapseListInStudio: Bool
     @ObservedObject private var app = AppModel.shared
@@ -329,7 +355,7 @@ private struct PostDetailView: View {
         Binding(
             get: { !model.editing ? .read : (model.splitPreview ? .split : .edit) },
             set: { value in
-                withAnimation(.smooth(duration: 0.2)) {
+                withAnimation(reduceMotion ? nil : .smooth(duration: 0.2)) {
                     switch value {
                     case .read:
                         model.editing = false
@@ -362,8 +388,14 @@ private struct PostDetailView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .animation(.smooth(duration: 0.18), value: model.editing)
-            .animation(.smooth(duration: 0.2), value: model.splitPreview)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.18), value: model.editing)
+            .animation(reduceMotion ? nil : .smooth(duration: 0.2), value: model.splitPreview)
+        }
+        .background(Color.blogBackground)
+        .onChange(of: app.aiRequested) {
+            if !model.draft.id.isEmpty && model.draft.bodyFormat != "html" && !mutatingBusy {
+                aiSnapshot = model.draft
+            }
         }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.data], allowsMultipleSelection: true) { result in
             switch result {
@@ -441,7 +473,8 @@ private struct PostDetailView: View {
                 .buttonStyle(BlogSecondaryButtonStyle(compact: true))
                 .fixedSize()
                 .disabled(model.draft.bodyFormat == "html" || mutatingBusy)
-                .help("AI 写作辅助：摘要、润色、续写")
+                .accessibilityLabel("AI 写作辅助")
+                .help("AI 写作辅助：摘要、润色、续写  ⌘⇧A")
 
                 if model.editing {
                     if model.isDirty {
@@ -558,6 +591,8 @@ private struct PostDetailView: View {
                 .buttonStyle(.plain)
                 .pointingHandCursor()
                 .help("切换行号显示")
+                .accessibilityLabel("切换行号显示")
+                .accessibilityValue(showLineNumbers ? "已开启" : "已关闭")
                 appearanceMenu
             }
             .padding(.horizontal, 14)
@@ -729,6 +764,7 @@ private struct PostDetailView: View {
         .fixedSize()
         .pointingHandCursor()
         .help("编辑器排版与滚动设置")
+        .accessibilityLabel("编辑器排版与滚动设置")
     }
 
     private var statusBar: some View {
@@ -855,7 +891,7 @@ private struct PostDetailView: View {
                             .buttonStyle(BlogSecondaryButtonStyle())
                             .disabled(mutatingBusy)
                         if !model.stagedIDs.contains(model.draft.id) {
-                            Button("删除草稿") {
+                            Button("删除草稿…") {
                                 model.delete(DataRow(data: ["id": model.draft.id, "title": model.draft.title, "publish": false]))
                             }
                             .buttonStyle(BlogSecondaryButtonStyle(destructive: true))
