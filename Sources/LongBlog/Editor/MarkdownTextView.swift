@@ -133,9 +133,9 @@ final class MarkdownGutterView: NSRulerView {
         let visibleInContainer = clip.bounds.offsetBy(dx: -origin.x, dy: -origin.y)
         let glyphRange = layout.glyphRange(forBoundingRect: visibleInContainer, in: container)
         let caretLineRange = s.lineRange(for: NSRange(location: min(textView.selectedRange().location, s.length), length: 0))
-        let font = NSFont.monospacedDigitSystemFont(ofSize: max(10, textView.highlighter.fontSize * 0.76), weight: .regular)
-        let activeFont = NSFont.monospacedDigitSystemFont(ofSize: max(10, textView.highlighter.fontSize * 0.76), weight: .semibold)
-        let mutedAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.lbMuted.withAlphaComponent(0.45)]
+        let font = NSFont.monospacedDigitSystemFont(ofSize: max(11, textView.highlighter.fontSize * 0.76), weight: .regular)
+        let activeFont = NSFont.monospacedDigitSystemFont(ofSize: max(11, textView.highlighter.fontSize * 0.76), weight: .semibold)
+        let mutedAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.lbMuted.withAlphaComponent(0.68)]
         let activeAttrs: [NSAttributedString.Key: Any] = [.font: activeFont, .foregroundColor: NSColor.lbAccent]
 
         if s.length == 0 {
@@ -872,7 +872,7 @@ struct MarkdownToolbar: View {
             Menu {
                 ForEach(overflow) { action in Button("\(action.title)\t\(action.shortcutLabel)") { controller.perform(action) } }
             } label: { Image(systemName: "ellipsis.circle") }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().editorPointingHand().help("更多格式")
+                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().editorPointingHand().help("更多格式").accessibilityLabel("更多 Markdown 格式")
             if let attach = attach {
                 Divider().frame(height: 16).padding(.horizontal, 3)
                 ToolbarIcon(symbol: "paperclip", help: "插入附件 / 图片（也可直接粘贴或拖入编辑器）", action: attach)

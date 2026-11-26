@@ -120,6 +120,8 @@ struct AIWritingSheet: View {
                     dismiss()
                 }
                 .buttonStyle(BlogPrimaryButtonStyle())
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("应用生成内容到编辑器  ⌘↩")
                 .disabled(busy || !completed || output.isEmpty)
             }
         }

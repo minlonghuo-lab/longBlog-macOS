@@ -99,7 +99,7 @@ func formattedISOBuildTime(_ raw: String?) -> String {
     }
     static func label(_ key: String) -> String {
         ["list": "读取列表", "load": "读取", "save": "保存", "new": "新建", "stage": "暂存", "sync": "同步", "commit": "提交",
-         "revert": "撤销", "delete": "删除", "attachment": "导入附件", "dashboard": "读取状态", "sessions": "读取会话", "messages": "读取消息",
+         "revert": "撤销", "delete": "删除", "deleteArchive": "删除归档", "attachment": "导入附件", "dashboard": "读取状态", "sessions": "读取会话", "messages": "读取消息",
          "read": "标记已读", "contact": "联系信息", "reply": "发送回复", "identity": "验证账户", "update": "更新",
          "upload": "上传附件", "download": "下载附件", "preview": "生成预览", "folder": "绑定目录",
          "settings": "读取连接"][key] ?? key
@@ -150,18 +150,21 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
     @Published var focusMode = false
     @Published var sidebarCollapsed = false
     @Published var searchRequested = UUID()
+    @Published var aiRequested = UUID()
     let dashboard = DashboardModel()
     let posts = PostsModel()
     let inbox = InboxModel()
     let memos = MemosModel()
     let configuration = ConfigurationModel()
     private var commandObservers: [NSObjectProtocol] = []
+    private var keyMonitor: Any?
     private weak var paletteSavedWindow: NSWindow?
     private weak var paletteSavedResponder: NSResponder?
     private var paletteSavedFieldSelection: NSRange?
-    static let commandNames = ["newArticle", "newMemo", "save", "review", "refresh", "search", "editArticle",
-                               "nav.dashboard", "nav.inbox", "nav.posts", "nav.memos", "nav.configuration", "settings",
-                               "layout.read", "layout.edit", "layout.split", "commandPalette", "shortcutsHelp", "toggleWindowZoom", "toggleFocus", "toggleSidebar"]
+    static let commandNames = ["newArticle", "newMemo", "save", "review", "syncArticles", "refresh", "search", "editArticle", "aiAssistant",
+                               "nav.dashboard", "nav.inbox", "nav.posts", "nav.memos", "nav.configuration", "nav.prev", "nav.next", "settings",
+                               "layout.read", "layout.edit", "layout.split", "editor.zoomIn", "editor.zoomOut", "editor.zoomReset",
+                               "commandPalette", "shortcutsHelp", "toggleWindowZoom", "toggleFocus", "toggleSidebar", "openSite"]
 
     /// Menu commands are routed ONCE here (not per view), so a second window or a
     /// re-created RootView can never execute ⌘N / ⌘S twice.
@@ -170,6 +173,25 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
             NotificationCenter.default.addObserver(forName: Notification.Name("longBlog." + name), object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated { AppModel.shared.route(name) }
             }
+        }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            let keyCode = event.keyCode
+            guard flags.isEmpty, (keyCode == 125 || keyCode == 126) else { return event }
+            let consumed = MainActor.assumeIsolated {
+                let app = AppModel.shared
+                guard !Self.activeTextInputHasMarkedText,
+                      app.confirmation == nil, !app.showingSettings, !app.showingReview, !app.showingShortcutsHelp,
+                      app.memos.previewAttachment == nil, !app.configuration.showingPreview,
+                      NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return false }
+                if let responder = NSApp.keyWindow?.firstResponder, responder is NSTextView {
+                    return false
+                }
+                guard app.canStepSelection else { return false }
+                app.stepSelection(keyCode == 125 ? 1 : -1)
+                return true
+            }
+            return consumed ? nil : event
         }
         commandObservers.append(
             NotificationCenter.default.addObserver(forName: Notification.Name("LBSyncDidChange"), object: nil, queue: .main) { _ in
@@ -207,6 +229,62 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
 
     var connectionLocked: Bool {
         posts.busy || inbox.busy || memos.busy || configuration.busy || dashboard.busy || showingReview || confirmation != nil
+    }
+
+    var canSaveCurrentSection: Bool {
+        switch section {
+        case .posts: return !posts.draft.id.isEmpty && posts.isDirty && !posts.busy
+        case .memos: return memos.editing && (memos.isDirty || memos.original == nil) && !memos.busy && (memos.original?["rowStatus"] as? String != "ARCHIVED")
+        case .configuration: return configuration.isDirty && !configuration.busy
+        default: return false
+        }
+    }
+
+    var isMarkdownEditingAvailable: Bool {
+        switch section {
+        case .posts: return posts.editing && !posts.draft.id.isEmpty && !posts.busy
+        case .memos: return memos.editing && !memos.busy && (memos.original?["rowStatus"] as? String != "ARCHIVED")
+        default: return false
+        }
+    }
+
+    var canStepSelection: Bool {
+        switch section {
+        case .posts: return posts.filtered.count > 1 && !posts.busy
+        case .inbox: return inbox.filtered.count > 1 && !inbox.busy
+        case .memos: return memos.filtered.count > 1 && !memos.busy
+        case .configuration: return configuration.sections.count > 1 && configuration.search.isEmpty && !configuration.busy
+        case .dashboard: return false
+        }
+    }
+
+    func stepSelection(_ delta: Int) {
+        switch section {
+        case .posts:
+            let list = posts.filtered
+            guard !list.isEmpty else { return }
+            let cur = list.firstIndex(where: { $0.id == posts.draft.id }) ?? (delta > 0 ? -1 : 0)
+            let next = min(max(0, cur + delta), list.count - 1)
+            if list.indices.contains(next) { posts.select(list[next]) }
+        case .inbox:
+            let list = inbox.filtered
+            guard !list.isEmpty else { return }
+            let cur = list.firstIndex(where: { $0.id == inbox.selected?.id }) ?? (delta > 0 ? -1 : 0)
+            let next = min(max(0, cur + delta), list.count - 1)
+            if list.indices.contains(next) { inbox.select(list[next]) }
+        case .memos:
+            let list = memos.filtered
+            guard !list.isEmpty else { return }
+            let cur = list.firstIndex(where: { $0.id == memos.selectedID }) ?? (delta > 0 ? -1 : 0)
+            let next = min(max(0, cur + delta), list.count - 1)
+            if list.indices.contains(next) { memos.select(list[next]) }
+        case .configuration:
+            guard !configuration.sections.isEmpty else { return }
+            configuration.search = ""
+            configuration.selectedSection = min(max(0, configuration.selectedSection + delta), configuration.sections.count - 1)
+        case .dashboard:
+            break
+        }
     }
 
     func resetConnectionViews() {
@@ -447,9 +525,15 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case "newMemo": newMemo()
         case "save": save()
         case "review": review()
+        case "syncArticles": navigate(.posts); posts.sync()
         case "refresh": refresh()
         case "search": search()
         case "editArticle": editArticle()
+        case "aiAssistant":
+            navigate(.posts)
+            if !posts.draft.id.isEmpty, posts.draft.bodyFormat != "html", !posts.busy {
+                aiRequested = UUID()
+            }
         case "settings": showingSettings = true
         case "commandPalette", "shortcutsHelp": toggleShortcutsHelp()
         case "toggleWindowZoom": toggleWindowZoom()
@@ -460,9 +544,24 @@ enum WorkspaceSection: String, CaseIterable, Identifiable {
         case "nav.posts": navigate(.posts)
         case "nav.memos": navigate(.memos)
         case "nav.configuration": navigate(.configuration)
+        case "nav.prev": stepSelection(-1)
+        case "nav.next": stepSelection(1)
         case "layout.read": if section == .posts, !posts.draft.id.isEmpty { posts.editing = false; focusMode = false }
         case "layout.edit": if section == .posts, !posts.draft.id.isEmpty { posts.editing = true; posts.splitPreview = false }
         case "layout.split": if section == .posts, !posts.draft.id.isEmpty { posts.editing = true; posts.splitPreview = true }
+        case "editor.zoomIn":
+            let current = UserDefaults.standard.object(forKey: "lb.editor.fontSize") as? Double ?? 15.0
+            UserDefaults.standard.set(min(24.0, current + 1.0), forKey: "lb.editor.fontSize")
+        case "editor.zoomOut":
+            let current = UserDefaults.standard.object(forKey: "lb.editor.fontSize") as? Double ?? 15.0
+            UserDefaults.standard.set(max(12.0, current - 1.0), forKey: "lb.editor.fontSize")
+        case "editor.zoomReset":
+            UserDefaults.standard.set(15.0, forKey: "lb.editor.fontSize")
+        case "openSite":
+            let raw = (dashboard.data["siteURL"] as? String) ?? LBUIConnectionSettings()["site"] as? String ?? "https://huowenlong.com"
+            if let url = URL(string: raw), url.scheme?.lowercased() == "https" {
+                NSWorkspace.shared.open(url)
+            }
         default: break
         }
     }
@@ -944,6 +1043,34 @@ struct PostDraft: Equatable {
         guard let selected = selected else { return }
         let revision = selectionRevision
         run("contact", "inbox.contact", ["id": selected.id]) { if revision == self.selectionRevision { self.contact = $0 } }
+    }
+
+    func markRead(_ row: DataRow) {
+        guard !archived, row.flag("unread") else { return }
+        let seq = Int(row.number("lastUserSequence"))
+        run("read", "inbox.read", ["id": row.id, "sequence": max(1, seq)]) { result in
+            self.unread = (result["unread"] as? NSNumber)?.intValue ?? max(0, self.unread - 1)
+            self.syncFromCore()
+        }
+    }
+
+    func deleteArchive(_ row: DataRow) {
+        guard archived, !busy else { return }
+        let titleText = row.text("title").isEmpty ? String(row.id.prefix(6)).uppercased() : row.text("title")
+        AppModel.shared.confirm("永久删除归档会话 #\(titleText)？", "将永久删除该会话的云端归档、残留消息及访客邮箱记录，其他设备也将无法再查看，且不可恢复。", button: "永久删除", destructive: true) {
+            self.run("deleteArchive", "inbox.deleteArchive", ["id": row.id], success: "归档会话已删除。") { _ in
+                if self.selected?.id == row.id {
+                    self.selected = nil
+                    self.messages = []
+                    self.contact = nil
+                }
+                self.sessions.removeAll { $0.id == row.id }
+                self.cachedSessionsByArchive[true] = self.sessions
+                if self.selected == nil, let first = self.sessions.first {
+                    self.select(first)
+                }
+            }
+        }
     }
 
     func send() {

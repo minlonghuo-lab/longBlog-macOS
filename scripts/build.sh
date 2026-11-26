@@ -10,8 +10,8 @@ BUILD="$ROOT/build"
 APP="$BUILD/longBlog.app"
 SDK="$(xcrun --sdk macosx --show-sdk-path)"
 MIN_MACOS=14.0
-VERSION="${VERSION:-0.2.0}"
-BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}"
+VERSION="${VERSION:-0.2.2}"
+BUILD_NUMBER="${GITHUB_RUN_NUMBER:-3}"
 BRIDGE="$ROOT/Sources/LongBlog/Core/LongBlog-Bridging-Header.h"
 # Delete only this script's disposable build products, never user documents.
 rm -rf "$BUILD/obj" "$APP" "$BUILD/dmg-root"

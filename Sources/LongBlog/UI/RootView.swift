@@ -3,6 +3,7 @@ import AppKit
 import QuartzCore
 
 struct RootView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var app = AppModel.shared
     @ObservedObject private var posts = AppModel.shared.posts
     @ObservedObject private var inbox = AppModel.shared.inbox
@@ -38,7 +39,7 @@ struct RootView: View {
         .onChange(of: sidebarShouldHide) { _, hide in
             let target: NavigationSplitViewVisibility = hide ? .detailOnly : .all
             if columnVisibility != target {
-                withAnimation(.easeInOut(duration: 0.25)) {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
                     columnVisibility = target
                 }
             }
@@ -317,7 +318,7 @@ struct RootView: View {
             .help("写说说  ⌘⇧N")
 
         case .configuration:
-            Button("提交到 main") { configuration.review() }
+            Button("提交到 main…") { configuration.review() }
             .buttonStyle(BlogPrimaryButtonStyle(large: true))
             .disabled(!configuration.isDirty || configuration.busy)
             .help("审阅并提交配置变更  ⌘S")
@@ -379,7 +380,7 @@ private struct WorkspaceSidebar: View {
                         .font(.system(size: 14.5, weight: .semibold))
                         .tracking(0.2)
                     Text("macOS Studio")
-                        .font(.system(size: 10.5))
+                        .font(.system(size: 11))
                         .foregroundStyle(Color.blogMuted)
                 }
                 Spacer()
@@ -426,7 +427,7 @@ private struct WorkspaceSidebar: View {
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.88)
                             Text(branchLine)
-                                .font(.system(size: 10.5, design: .monospaced))
+                                .font(.system(size: 11, design: .monospaced))
                                 .foregroundStyle(Color.blogMuted)
                                 .lineLimit(1)
                         }
@@ -518,7 +519,15 @@ private struct SidebarItemRow: View {
     let dirtyDot: Bool
     let shortcut: String
     let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
+
+    private var accessibilityValueText: String {
+        var parts: [String] = []
+        if let badge, !badge.isEmpty { parts.append("\(badge) 项") }
+        if dirtyDot { parts.append("有未保存修改") }
+        return parts.joined(separator: "，")
+    }
 
     var body: some View {
         Button(action: action) {
@@ -560,14 +569,16 @@ private struct SidebarItemRow: View {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .strokeBorder(selected ? Color.blogPeach.opacity(0.32) : .clear)
             )
-            .animation(.snappy(duration: 0.18), value: selected)
-            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: selected)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: hovering)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .pointingHandCursor()
         .help("\(section.rawValue)  \(shortcut)")
         .accessibilityLabel(section.rawValue)
+        .accessibilityValue(accessibilityValueText)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }
 
@@ -608,12 +619,14 @@ private struct ShortcutsHelpPopover: View {
     private let groups: [(title: String, symbol: String, items: [Item])] = [
         ("工作区导航", "sidebar.left", [
             Item(key: "⌘1 ～ ⌘5", label: "切换仪表盘 / 留言 / 文章 / 说说 / 配置"),
+            Item(key: "⌘[ / ⌘]", label: "切换当前列表上一项 / 下一项（或 ↑ / ↓）"),
             Item(key: "⌘\\", label: "显示或收起左侧导航栏"),
             Item(key: "⌃⌘Z", label: "窗口铺满屏幕 / 还原默认尺寸")
         ]),
         ("创作与同步", "square.and.pencil", [
             Item(key: "⌘N", label: "新建本地 Markdown 文章"),
             Item(key: "⌘⇧N", label: "新建一条说说"),
+            Item(key: "⌘⇧A", label: "打开文章 AI 写作辅助"),
             Item(key: "⌘S", label: "保存当前修改 / 审阅配置"),
             Item(key: "⌘⇧P", label: "审阅并批量提交暂存文章"),
             Item(key: "⌘R", label: "刷新当前板块状态")
@@ -677,8 +690,12 @@ private struct ShortcutsHelpPopover: View {
             }
         }
         .padding(18)
-        .frame(width: 376)
-        .background(Color.blogBackground)
+        .frame(width: 384)
+        .background {
+            if #unavailable(macOS 26.0) {
+                Color.blogBackground
+            }
+        }
     }
 }
 

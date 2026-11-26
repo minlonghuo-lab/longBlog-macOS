@@ -80,7 +80,7 @@ struct DashboardView: View {
                             .font(.system(size: 12))
                             .foregroundStyle(Color.blogSecondary)
                         Spacer()
-                        Button("审阅并提交  ⌘⇧P") { app.review() }
+                        Button("审阅并提交…  ⌘⇧P") { app.review() }
                             .buttonStyle(BlogPrimaryButtonStyle(compact: true))
                     }
                     .padding(.horizontal, 16)
@@ -323,6 +323,7 @@ private struct DashboardMetricCard: View {
     let symbol: String
     let tint: Color
     let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     var body: some View {
@@ -355,21 +356,29 @@ private struct DashboardMetricCard: View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .strokeBorder(hovering ? Color.blogPeach.opacity(0.4) : Color.blogStroke)
             )
-            .offset(y: hovering ? -1.5 : 0)
-            .animation(.easeOut(duration: 0.14), value: hovering)
+            .offset(y: hovering && !reduceMotion ? -1.5 : 0)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .pointingHandCursor()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue("\(value)，\(note)")
+        .accessibilityHint("点击前往\(title)板块")
+        .accessibilityAddTraits(.isButton)
     }
 }
 
 private struct InboxDashboardCard: View {
     @ObservedObject var model: InboxModel
     let action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     var body: some View {
+        let countText = model.loaded && !model.archived ? "\(model.sessions.count)" : "—"
+        let noteText = model.loaded ? (model.unread > 0 ? "\(model.unread) 个未读会话" : "进行中的会话") : "尚未读取留言服务"
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("终端留言")
@@ -390,11 +399,11 @@ private struct InboxDashboardCard: View {
             }
             Button(action: action) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(model.loaded && !model.archived ? "\(model.sessions.count)" : "—")
+                    Text(countText)
                         .font(.system(size: 38, weight: .bold, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(Color.blogText)
-                    Text(model.loaded ? (model.unread > 0 ? "\(model.unread) 个未读会话" : "进行中的会话") : "尚未读取留言服务")
+                    Text(noteText)
                         .font(.system(size: 12))
                         .foregroundStyle(model.unread > 0 ? Color.blogPeachSoft : Color.blogMuted)
                         .lineLimit(1)
@@ -404,6 +413,11 @@ private struct InboxDashboardCard: View {
             }
             .buttonStyle(.plain)
             .pointingHandCursor()
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("终端留言")
+            .accessibilityValue("\(countText)，\(noteText)")
+            .accessibilityHint("点击前往终端留言板块")
+            .accessibilityAddTraits(.isButton)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -412,9 +426,9 @@ private struct InboxDashboardCard: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(hovering ? Color.blogPeach.opacity(0.4) : Color.blogStroke)
         )
-        .offset(y: hovering ? -1.5 : 0)
+        .offset(y: hovering && !reduceMotion ? -1.5 : 0)
         .onHover { hovering = $0 }
         .pointingHandCursor()
-        .animation(.easeOut(duration: 0.14), value: hovering)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
     }
 }

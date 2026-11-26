@@ -151,6 +151,7 @@ struct MenuBarPanelView: View {
                 .pointingHandCursor(!dashboard.busy)
                 .foregroundStyle(Color.blogMuted)
                 .disabled(dashboard.busy)
+                .accessibilityLabel("刷新站点状态")
                 .help("刷新状态")
             }
 
@@ -271,6 +272,7 @@ struct MenuBarPanelView: View {
                     Image(systemName: "plus").frame(width: 14, height: 16)
                 }
                 .buttonStyle(BlogSecondaryButtonStyle())
+                .accessibilityLabel("新建文章")
                 .help("新建文章 ⌘N")
 
                 Button {
@@ -279,6 +281,7 @@ struct MenuBarPanelView: View {
                     Image(systemName: "square.and.pencil").frame(width: 14, height: 16)
                 }
                 .buttonStyle(BlogSecondaryButtonStyle())
+                .accessibilityLabel("写说说")
                 .help("写说说 ⌘⇧N")
             }
         }

@@ -249,6 +249,7 @@ void LBUIRequest(NSString *op, NSDictionary *a, void (^done)(NSDictionary *, NSE
         }); return;
     }
     if ([op isEqual:@"inbox.archives"]) { WarmKeychain(@[@"owner-key"], ^{ [LBAPI.shared fetchArchivedSessions:a[@"cursor"] done:^(NSArray *rows, NSString *cursor, NSError *e){ Finish(done,@{@"rows":Sessions(rows ?: @[]), @"cursor":cursor ?: @""},e); }]; }); return; }
+    if ([op isEqual:@"inbox.deleteArchive"]) { WarmKeychain(@[@"owner-key"], ^{ [LBAPI.shared deleteArchivedSession:a[@"id"] done:^(NSError *e){ Finish(done, e ? nil : @{}, e); }]; }); return; }
     if ([op isEqual:@"inbox.messages"]) {
         void (^completion)(NSArray *, NSInteger, NSError *) = ^(NSArray *rows, NSInteger cursor, NSError *e) {
             NSMutableArray *messages = [NSMutableArray array]; for (LBMessage *m in rows) [messages addObject:Message(m)];

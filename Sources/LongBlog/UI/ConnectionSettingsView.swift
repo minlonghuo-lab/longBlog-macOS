@@ -31,6 +31,7 @@ struct ConnectionSettingsView: View {
                 if dirty { StatusBadge(text: "尚未保存", color: .blogAmber, dot: true, pill: true) }
                 Button("完成") { close() }
                     .buttonStyle(BlogSecondaryButtonStyle(compact: true))
+                    .keyboardShortcut(.cancelAction)
                     .disabled(status.busy)
             }
             .padding(.horizontal, 24)
@@ -89,7 +90,7 @@ struct ConnectionSettingsView: View {
                                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                                 }
                             }
-                            Button("恢复默认") { resetFolder() }.disabled(locked)
+                            Button("恢复默认…") { resetFolder() }.disabled(locked)
                         }
                         Button("选择文件夹…") { chooseFolder() }.disabled(locked)
                     }
@@ -152,6 +153,7 @@ struct ConnectionSettingsView: View {
                 Spacer()
                 Button("保存连接…") { save() }
                     .buttonStyle(BlogPrimaryButtonStyle())
+                    .keyboardShortcut(.defaultAction)
                     .disabled(locked || !dirty)
             }
             .padding(.horizontal, 24)
